@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,7 @@ class LexofficeClient:
         while True:
             data = self._get("/voucherlist", {
                 "voucherType": "salesinvoice",
+                "voucherStatus": "open,paid,voided,draft",
                 "voucherDateFrom": date_str,
                 "voucherDateTo": date_str,
                 "page": page,
@@ -230,7 +231,12 @@ def _build_items(
     return items
 
 
-def _item(gross: Decimal, vat: Decimal, category_id: str) -> dict:
+def _item(gross: Decimal, _vat_ignored: Decimal, category_id: str) -> dict:
+    # Recalculate VAT from the aggregated gross to avoid accumulated rounding
+    # errors from per-product splits that Lexoffice rejects as invalid_taxamount.
+    vat = (gross * Decimal("0.19") / Decimal("1.19")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
     return {
         "amount":         float(gross),
         "taxAmount":      float(vat),
