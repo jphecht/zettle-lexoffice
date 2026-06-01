@@ -19,7 +19,7 @@ from zettle_client import CARD_PAYMENT_TYPES
 logger = logging.getLogger(__name__)
 
 VAT_RATE = Decimal("0.19")
-SERVICE_PRODUCT_NAMES = {"Dienstleistung"}
+SERVICE_PRODUCT_NAMES = {"Dienstleistung", "Beispiel Zusatzleistung"}
 
 
 @dataclass
