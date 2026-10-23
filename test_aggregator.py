@@ -30,7 +30,9 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dic
     return {"currency": "EUR", "products": products, "payments": payments}
 
 
-def _custom_config(*, allow_discounts=False, tips=False) -> AccountingConfig:
+def _custom_config(
+    *, allow_discounts=False, tips=False, refunds=False
+) -> AccountingConfig:
     return AccountingConfig(
         currency="EUR",
         product_rules=(
@@ -49,7 +51,31 @@ def _custom_config(*, allow_discounts=False, tips=False) -> AccountingConfig:
             TipRule("101", "entrepreneur", "ownerTips", Decimal("19")),
             TipRule("202", "employee", "employeeTips", Decimal("0")),
         ) if tips else (),
+        refund_mode="separateCreditNote" if refunds else "reject",
     )
+
+
+def _refund(
+    name="Haarschnitt", amount_cents=1000, payment_type="IZETTLE_CARD"
+) -> dict:
+    return {
+        "currency": "EUR",
+        "amount": -amount_cents,
+        "refund": True,
+        "refundsPurchaseUUID1": "original-purchase-uuid",
+        "products": [{
+            "name": name,
+            "unitPrice": amount_cents,
+            "quantity": "-1",
+            "grossValue": -amount_cents,
+            "vatPercentage": 19,
+        }],
+        "payments": [{
+            "amount": -amount_cents,
+            "type": payment_type,
+            "references": {"refundsPayment": "original-payment-uuid"},
+        }],
+    }
 
 
 class TestVatCalculation(unittest.TestCase):
@@ -73,6 +99,15 @@ class TestProductGross(unittest.TestCase):
     def test_invalid(self):
         with self.assertRaises(AggregationError):
             _product_gross({"unitPrice": "bad"})
+
+    def test_refund_is_returned_as_positive_magnitude(self):
+        self.assertEqual(
+            _product_gross(
+                {"unitPrice": 500, "quantity": "-1", "grossValue": -500},
+                refund=True,
+            ),
+            Decimal("5.00"),
+        )
 
 
 class TestAggregate(unittest.TestCase):
@@ -162,6 +197,98 @@ class TestAggregate(unittest.TestCase):
         with self.assertRaises(AggregationError):
             aggregate([p])
 
+    def test_refund_becomes_separate_positive_summary(self):
+        summary = aggregate([_refund()], _custom_config(refunds=True))
+        self.assertEqual(summary.total_gross, Decimal("0"))
+        self.assertEqual(summary.refund_total_gross, Decimal("10.00"))
+        self.assertEqual(summary.net_gross, Decimal("-10.00"))
+        self.assertEqual(summary.refund_card_gross, Decimal("10.00"))
+        self.assertTrue(summary.has_card_refund)
+        self.assertFalse(summary.has_card)
+
+    def test_sale_and_refund_are_not_netted_before_booking(self):
+        sale = {
+            "currency": "EUR",
+            "amount": 2000,
+            "products": [{
+                "name": "Haarschnitt", "unitPrice": 2000, "quantity": "1",
+            }],
+            "payments": [{"amount": 2000, "type": "IZETTLE_CARD"}],
+        }
+        summary = aggregate([sale, _refund()], _custom_config(refunds=True))
+        self.assertEqual(summary.card_gross, Decimal("20.00"))
+        self.assertEqual(summary.refund_card_gross, Decimal("10.00"))
+        self.assertEqual(summary.net_gross, Decimal("10.00"))
+
+    def test_partial_refund_uses_refunded_amount(self):
+        summary = aggregate([_refund(amount_cents=500)], _custom_config(refunds=True))
+        self.assertEqual(summary.refund_total_gross, Decimal("5.00"))
+
+    def test_refund_preserves_multiple_categories_rates_and_payments(self):
+        refund = {
+            "currency": "EUR",
+            "amount": -22600,
+            "refund": True,
+            "refundsPurchaseUUID1": "original-purchase-uuid",
+            "products": [
+                {
+                    "name": "Haarschnitt", "unitPrice": 11900,
+                    "quantity": "-1", "grossValue": -11900,
+                    "vatPercentage": 19,
+                },
+                {
+                    "name": "Snack", "unitPrice": 10700,
+                    "quantity": "-1", "grossValue": -10700,
+                    "vatPercentage": 7,
+                },
+            ],
+            "payments": [
+                {
+                    "amount": -10000,
+                    "type": "CASH",
+                    "references": {"refundsPayment": "cash-payment"},
+                },
+                {
+                    "amount": -12600,
+                    "type": "IZETTLE_CARD",
+                    "references": {"refundsPayment": "card-payment"},
+                },
+            ],
+        }
+        summary = aggregate([refund], _custom_config(refunds=True))
+        self.assertEqual(summary.refund_total_gross, Decimal("226.00"))
+        self.assertEqual(summary.refund_cash_gross, Decimal("100.00"))
+        self.assertEqual(summary.refund_card_gross, Decimal("126.00"))
+        self.assertEqual(
+            summary.refund_category_totals(),
+            {"hair": Decimal("119.00"), "food": Decimal("107.00")},
+        )
+
+    def test_refund_with_positive_payment_is_rejected(self):
+        refund = _refund()
+        refund["payments"][0]["amount"] = 1000
+        refund["amount"] = 1000
+        with self.assertRaises(AggregationError):
+            aggregate([refund], _custom_config(refunds=True))
+
+    def test_refund_without_original_purchase_reference_is_rejected(self):
+        refund = _refund()
+        del refund["refundsPurchaseUUID1"]
+        with self.assertRaises(AggregationError):
+            aggregate([refund], _custom_config(refunds=True))
+
+    def test_refund_without_original_payment_reference_is_rejected(self):
+        refund = _refund()
+        del refund["payments"][0]["references"]
+        with self.assertRaises(AggregationError):
+            aggregate([refund], _custom_config(refunds=True))
+
+    def test_refunded_tip_is_rejected_explicitly(self):
+        refund = _refund()
+        refund["payments"][0]["gratuityAmount"] = -100
+        with self.assertRaises(AggregationError):
+            aggregate([refund], _custom_config(refunds=True, tips=True))
+
     def test_explicit_non_19_percent_vat_is_rejected(self):
         p = _purchase(service_cents=1000)
         p["products"][0]["vatPercentage"] = 7
@@ -216,6 +343,7 @@ class TestAggregate(unittest.TestCase):
     def test_owner_tip_uses_configured_revenue_and_vat(self):
         p = {
             "currency": "EUR",
+            "amount": 1000,
             "userId": 101,
             "products": [{
                 "name": "Haarschnitt", "unitPrice": 1000, "quantity": "1",

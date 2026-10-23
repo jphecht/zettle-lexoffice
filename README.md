@@ -9,15 +9,16 @@ verbunden.
 - Trennt Kartenzahlungen und Barzahlungen
 - Rechnet konfigurierte Umsatzsteuersätze aus Bruttobeträgen heraus
 - Kann explizit von Zettle gemeldetes Trinkgeld nach Kassenbenutzer und Rolle aufteilen
-- Legt je einen Bar- und Karten-Sammelbeleg (`salesinvoice`) in Lexware Office an
+- Legt Bar- und Kartenumsätze als Sammelbelege (`salesinvoice`) an
+- Legt Rückerstattungen getrennt als Verkaufsgutschriften (`salescreditnote`) an
 - Schützt vor Doppel-Import und überspringt umsatzlose Tage
 - Bricht bei unbekannten oder nicht abgestimmten Daten ab, statt sie zu schätzen
 
 > **Wichtige Einschränkung:** Ohne eigene Konfiguration bleibt das bisherige
 > Verhalten mit `Dienstleistung`, `Damen WaSchFö`, `Verkauf` und 19 % erhalten.
-> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze, Rabatte und
-> Trinkgeldregeln konfigurieren. Gutscheine, Gebühren, Stornos und
-> Rückerstattungen bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
+> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze, Rabatte,
+> Trinkgeldregeln und Rückerstattungen konfigurieren. Gutscheine, Gebühren und
+> sonstige Stornos bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
 > Abweichung, legt es keinen Beleg an.
 
 ---
@@ -170,6 +171,24 @@ oder unbekannter ID bricht der Tag vor dem Schreiben nach Lexware ab.
 > Arbeitnehmer-Trinkgeld setzt insbesondere die Voraussetzungen des
 > [§ 3 Nr. 51 EStG](https://www.gesetze-im-internet.de/estg/__3.html) voraus.
 
+#### Rückerstattungen als getrennte Gutschriften
+
+Mit `"refunds": "separateCreditNote"` werden Zettle-Rückerstattungen nicht mit
+den Tagesumsätzen verrechnet. Das Programm erzeugt stattdessen je Zahlungsart
+einen eigenen Lexware-Beleg vom Typ `salescreditnote`. Dadurch bleiben
+ursprünglicher Umsatz und Erstattung getrennt nachvollziehbar.
+
+Verarbeitet werden ausschließlich eindeutig gekennzeichnete Zettle-Vorgänge mit
+`refund: true`, negativen Produkt- und Zahlungsbeträgen sowie Referenzen auf den
+Ursprungskauf und die ursprüngliche Zahlung. Teilrückerstattungen werden mit dem
+tatsächlich erstatteten Betrag erfasst. Fehlende Referenzen, widersprüchliche
+Vorzeichen oder Erstattungen von Trinkgeld führen vor jedem Lexware-Schreibzugriff
+zum Abbruch des gesamten Tages.
+
+Ohne eigene Konfiguration bleibt `refunds` auf `reject`; das bisherige Verhalten
+ändert sich daher nicht. Die verwendeten Produktnamen und Steuersätze müssen auch
+bei der Rückerstattung eindeutig in `accounting.json` zugeordnet sein.
+
 ---
 
 ### Fertige `.env`
@@ -212,7 +231,7 @@ python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
 
 ```
 10:15:01 INFO     === Logging to logs/2025-06-01.log ===
-10:15:02 INFO     [  1/151] 2025-01-01  ✓  Brutto 312.45 €  (Karte 268.65 €, Bar 43.80 €)  id=abc…
+10:15:02 INFO     [  1/151] 2025-01-01  ✓  Umsatz 312.45 €  Erstattungen 12.00 €  Netto 300.45 €  ids=['abc…', 'def…']
 10:15:03 INFO     [  2/151] 2025-01-02  –  kein Umsatz
 10:15:04 INFO     [  3/151] 2025-01-03  –  Beleg bereits vorhanden
 10:15:05 ERROR    [  4/151] 2025-01-04  ✗  Zettle-Fehler: Request failed after 3 attempts

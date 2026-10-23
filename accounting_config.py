@@ -175,8 +175,10 @@ def _parse_config(raw: object) -> AccountingConfig:
         adjustments.get("tips", "reject"), category_environment
     )
     refund_mode = adjustments.get("refunds", "reject")
-    if refund_mode != "reject":
-        raise ConfigurationError("Erstattungsmodus ist noch nicht fachlich konfiguriert")
+    if refund_mode not in {"reject", "separateCreditNote"}:
+        raise ConfigurationError(
+            "adjustments.refunds muss reject oder separateCreditNote sein"
+        )
 
     return AccountingConfig(
         currency=currency,
