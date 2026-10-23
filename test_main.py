@@ -22,7 +22,7 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=None, card_cents=0) -> 
         payments.append({"amount": cash_cents, "type": "CASH"})
     if card_cents:
         payments.append({"amount": card_cents, "type": "IZETTLE_CARD"})
-    return {"products": products, "payments": payments}
+    return {"currency": "EUR", "products": products, "payments": payments}
 
 
 def _mock_zettle(purchases):

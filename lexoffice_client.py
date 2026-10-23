@@ -1,9 +1,8 @@
 import logging
 import time
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
-from zoneinfo import ZoneInfo
 
 import requests
 
@@ -12,7 +11,6 @@ from aggregator import DailySummary
 logger = logging.getLogger(__name__)
 
 LEXOFFICE_BASE_URL = "https://api.lexware.io/v1"
-BERLIN_TZ = ZoneInfo("Europe/Berlin")
 _REMARK_PREFIX = "zettle-import"
 
 
@@ -55,7 +53,7 @@ class LexofficeClient:
         while True:
             data = self._get("/voucherlist", {
                 "voucherType": "salesinvoice",
-                "voucherStatus": "open,paid,voided,draft",
+                "voucherStatus": "any",
                 "voucherDateFrom": date_str,
                 "voucherDateTo": date_str,
                 "page": page,
@@ -136,10 +134,6 @@ class LexofficeClient:
     def _build_payload(
         self, business_date: date, summary: DailySummary, suffix: str
     ) -> dict:
-        voucher_dt = datetime(
-            business_date.year, business_date.month, business_date.day,
-            tzinfo=BERLIN_TZ,
-        )
         date_str = business_date.isoformat()
 
         if suffix == "bar":
@@ -162,7 +156,7 @@ class LexofficeClient:
 
         return {
             "type": "salesinvoice",
-            "voucherDate": voucher_dt.isoformat(),
+            "voucherDate": date_str,
             "taxType": "gross",
             "totalGrossAmount": total_gross,
             "totalTaxAmount":   total_vat,

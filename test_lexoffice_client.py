@@ -115,9 +115,8 @@ class TestBuildPayload(unittest.TestCase):
         amounts = [i["amount"] for i in p["voucherItems"]]
         self.assertAlmostEqual(sum(amounts), 200.0, places=2)  # cash total
 
-    def test_berlin_timezone_in_date(self):
-        dt = self._bar()["voucherDate"]
-        self.assertTrue("+01:00" in dt or "+02:00" in dt)
+    def test_voucher_date_uses_documented_date_format(self):
+        self.assertEqual(self._bar()["voucherDate"], TEST_DATE_STR)
 
 
 class TestBuildItems(unittest.TestCase):
@@ -151,6 +150,12 @@ class TestCreateDailyVouchers(unittest.TestCase):
 
     def _patch(self):
         return patch.object(self.client._session, "request")
+
+    def test_duplicate_search_includes_every_status(self):
+        with self._patch() as mock_req:
+            mock_req.return_value = _ok({"content": [], "last": True})
+            self.client.vouchers_exist_for_date(TEST_DATE)
+        self.assertEqual(mock_req.call_args.kwargs["params"]["voucherStatus"], "any")
 
     def test_cash_only_creates_bar_voucher(self):
         s = _summary(cash_service=100)

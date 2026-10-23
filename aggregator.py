@@ -104,6 +104,12 @@ def aggregate(purchases: list[dict]) -> DailySummary:
 def _process_purchase(summary: DailySummary, purchase: dict) -> None:
     if not isinstance(purchase, dict):
         raise AggregationError("Ungültiger Zettle-Kauf: Objekt erwartet")
+    if purchase.get("currency") != "EUR":
+        raise AggregationError("Nur Zettle-Käufe in EUR werden unterstützt")
+    if purchase.get("refund") is True:
+        raise AggregationError(
+            "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
+        )
 
     # Step 1: cash vs card totals from payment amounts (in minor units)
     cash_minor = Decimal("0")
@@ -149,6 +155,7 @@ def _process_purchase(summary: DailySummary, purchase: dict) -> None:
     for prod in products:
         if not isinstance(prod, dict):
             raise AggregationError("Ungültige Produktposition im Zettle-Kauf")
+        _validate_product_tax(prod)
         gross = _product_gross(prod)
         if gross == Decimal("0"):
             continue
@@ -214,7 +221,34 @@ def _product_gross(prod: dict) -> Decimal:
             "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
         )
     gross = (qty * unit_minor / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if "grossValue" in prod:
+        try:
+            reported_gross = (Decimal(str(prod["grossValue"])) / 100).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        except (ValueError, TypeError, DecimalException) as exc:
+            raise AggregationError("Ungültiger Zettle-Bruttowert") from exc
+        if not reported_gross.is_finite() or reported_gross != gross:
+            raise AggregationError(
+                "Zettle-Produkt enthält Rabatt oder abweichenden Bruttowert"
+            )
     return gross
+
+
+def _validate_product_tax(prod: dict) -> None:
+    """Reject explicit tax information that is incompatible with 19% VAT."""
+    if prod.get("taxExempt") is True:
+        raise AggregationError("Steuerbefreite Produkte werden nicht unterstützt")
+    if "vatPercentage" not in prod:
+        return
+    try:
+        rate = Decimal(str(prod["vatPercentage"]))
+    except (ValueError, TypeError, DecimalException) as exc:
+        raise AggregationError("Ungültiger Zettle-Steuersatz") from exc
+    if not rate.is_finite() or rate != Decimal("19"):
+        raise AggregationError(
+            f"Nicht unterstützter Zettle-Steuersatz: {rate}%"
+        )
 
 
 def _vat_from_gross(gross: Decimal) -> Decimal:

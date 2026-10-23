@@ -26,7 +26,7 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dic
         payments.append({"amount": cash_cents, "type": "CASH"})
     if card_cents:
         payments.append({"amount": card_cents, "type": "IZETTLE_CARD"})
-    return {"products": products, "payments": payments}
+    return {"currency": "EUR", "products": products, "payments": payments}
 
 
 class TestVatCalculation(unittest.TestCase):
@@ -105,19 +105,55 @@ class TestAggregate(unittest.TestCase):
 
     def test_unknown_product_is_rejected(self):
         p = {"products": [{"name": "Sonstiges", "unitPrice": 5000, "quantity": "1"}],
-             "payments": [{"amount": 5000, "type": "CASH"}]}
+             "payments": [{"amount": 5000, "type": "CASH"}], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
 
     def test_non_dict_product_is_rejected(self):
         p = {"products": [True, None, {"name": "Dienstleistung", "unitPrice": 1000, "quantity": "1"}],
-             "payments": [{"amount": 1000, "type": "CASH"}]}
+             "payments": [{"amount": 1000, "type": "CASH"}], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
 
     def test_unknown_payment_type_is_rejected(self):
         p = _purchase(service_cents=1000, cash_cents=1000)
         p["payments"][0]["type"] = "MYSTERY"
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_non_eur_purchase_is_rejected(self):
+        p = _purchase(service_cents=1000)
+        p["currency"] = "GBP"
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_missing_currency_is_rejected(self):
+        p = _purchase(service_cents=1000)
+        del p["currency"]
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_refund_flag_is_rejected(self):
+        p = _purchase(service_cents=1000)
+        p["refund"] = True
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_explicit_non_19_percent_vat_is_rejected(self):
+        p = _purchase(service_cents=1000)
+        p["products"][0]["vatPercentage"] = 7
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_explicit_19_percent_vat_is_accepted(self):
+        p = _purchase(service_cents=11900)
+        p["products"][0]["vatPercentage"] = 19.0
+        self.assertEqual(aggregate([p]).total_gross, Decimal("119.00"))
+
+    def test_discounted_gross_value_is_rejected(self):
+        p = _purchase(service_cents=1000)
+        p["products"][0]["grossValue"] = 900
+        p["payments"][0]["amount"] = 900
         with self.assertRaises(AggregationError):
             aggregate([p])
 
@@ -128,7 +164,7 @@ class TestAggregate(unittest.TestCase):
 
     def test_products_without_payment_are_rejected(self):
         p = {"products": [{"name": "Verkauf", "unitPrice": 1000, "quantity": "1"}],
-             "payments": []}
+             "payments": [], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
 
@@ -140,13 +176,13 @@ class TestAggregate(unittest.TestCase):
 
     def test_non_finite_product_is_rejected(self):
         p = {"products": [{"name": "Verkauf", "unitPrice": "NaN", "quantity": "1"}],
-             "payments": [{"amount": 1000, "type": "CASH"}]}
+             "payments": [{"amount": 1000, "type": "CASH"}], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
 
     def test_refund_is_rejected(self):
         p = {"products": [{"name": "Verkauf", "unitPrice": -1000, "quantity": "1"}],
-             "payments": [{"amount": -1000, "type": "CASH"}]}
+             "payments": [{"amount": -1000, "type": "CASH"}], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
 
