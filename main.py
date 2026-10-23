@@ -8,6 +8,7 @@ Verwendung:
   python main.py --from 2025-01-01 --to 2025-05-31  # Bulk-Import
   python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
   python main.py --review-gift-cards                 # nur lokale Vorprüfung
+  python main.py --review-catalog                    # Zettle nur lesend
 """
 import argparse
 import logging
@@ -26,6 +27,7 @@ from accounting_config import (
     load_accounting_config,
 )
 from aggregator import AggregationError, DailySummary, aggregate
+from catalog_review import format_catalog_review, review_product_catalog
 from lexoffice_client import LexofficeAPIError, LexofficeClient
 from zettle_client import ZettleAPIError, ZettleClient
 
@@ -82,6 +84,10 @@ def _parse_args() -> argparse.Namespace:
         "--review-gift-cards", action="store_true",
         help="Gutschein-Konfiguration lokal prüfen (keine API-Aufrufe)",
     )
+    group.add_argument(
+        "--review-catalog", action="store_true",
+        help="Zettle-Produktkatalog nur lesend gegen die Konfiguration prüfen",
+    )
     p.add_argument(
         "--to", dest="to_date", metavar="YYYY-MM-DD",
         help="Enddatum für Bulk-Import (erforderlich mit --from)",
@@ -96,8 +102,8 @@ def _parse_args() -> argparse.Namespace:
         p.error("--from erfordert auch --to")
     if args.to_date and not args.from_date:
         p.error("--to erfordert auch --from")
-    if args.review_gift_cards and args.dry_run:
-        p.error("--review-gift-cards kann nicht mit --dry-run kombiniert werden")
+    if (args.review_gift_cards or args.review_catalog) and args.dry_run:
+        p.error("Prüfmodi können nicht mit --dry-run kombiniert werden")
 
     return args
 
@@ -250,6 +256,23 @@ def main() -> None:
         except ConfigurationError as exc:
             sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
         print(_gift_card_review_detail(config))
+        return
+
+    if args.review_catalog:
+        api_key = os.environ.get("ZETTLE_API_KEY", "")
+        if not api_key:
+            sys.exit("Fehlende Umgebungsvariable in .env: ZETTLE_API_KEY")
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+            products = ZettleClient(api_key).get_products()
+            review = review_product_catalog(products, config)
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        except ZettleAPIError as exc:
+            sys.exit(f"Zettle-Fehler: {exc}")
+        print(format_catalog_review(review, config))
+        if review.blockers:
+            sys.exit(1)
         return
 
     _setup_logging()
