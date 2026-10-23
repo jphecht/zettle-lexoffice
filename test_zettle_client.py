@@ -153,8 +153,28 @@ class TestGetPurchasesForDay(unittest.TestCase):
         mock_get.return_value = _purchases_resp([])
         self.client.get_purchases_for_day(self.test_date)
         params = mock_get.call_args[1]["params"]
-        self.assertEqual(params["startDate"], "2025-01-15T00:00:00.000+0000")
-        self.assertEqual(params["stopDate"],  "2025-01-16T00:00:00.000+0000")
+        self.assertEqual(params["startDate"], "2025-01-14T23:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-01-15T23:00:00.000+0000")
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_summer_date_uses_berlin_dst(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        mock_get.return_value = _purchases_resp([])
+        self.client.get_purchases_for_day(date(2025, 7, 15))
+        params = mock_get.call_args[1]["params"]
+        self.assertEqual(params["startDate"], "2025-07-14T22:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-07-15T22:00:00.000+0000")
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_dst_start_day_has_23_hours(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        mock_get.return_value = _purchases_resp([])
+        self.client.get_purchases_for_day(date(2025, 3, 30))
+        params = mock_get.call_args[1]["params"]
+        self.assertEqual(params["startDate"], "2025-03-29T23:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-03-30T22:00:00.000+0000")
 
     @patch("zettle_client.requests.post")
     @patch("zettle_client.requests.get")
@@ -177,6 +197,49 @@ class TestGetPurchasesForDay(unittest.TestCase):
         result = self.client.get_purchases_for_day(self.test_date)
         self.assertEqual(len(result), 1001)
         self.assertEqual(mock_get.call_args_list[1][1]["params"]["lastPurchaseHash"], "hash-abc")
+
+    @patch("zettle_client.time.sleep")
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_pagination_without_hash_is_rejected(self, mock_get, mock_post, _sleep):
+        mock_post.return_value = _token_post_mock()
+        page = [_make_purchase(f"p-{i}", 1000, "CASH") for i in range(1000)]
+        mock_get.return_value = _purchases_resp(page, has_more=True)
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.time.sleep")
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_repeated_pagination_hash_is_rejected(self, mock_get, mock_post, _sleep):
+        mock_post.return_value = _token_post_mock()
+        page = [_make_purchase(f"p-{i}", 1000, "CASH") for i in range(1000)]
+        mock_get.side_effect = [
+            _purchases_resp(page, last_hash="same", has_more=True),
+            _purchases_resp(page, last_hash="same", has_more=True),
+        ]
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_missing_timestamp_is_rejected(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        purchase = _make_purchase("no-time", 1000, "CASH")
+        del purchase["timestamp"]
+        mock_get.return_value = _purchases_resp([purchase])
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_timestamp_without_timezone_is_rejected(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        purchase = _make_purchase("naive-time", 1000, "CASH")
+        purchase["timestamp"] = "2025-01-15T10:00:00"
+        mock_get.return_value = _purchases_resp([purchase])
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
 
     @patch("zettle_client.time.sleep")
     @patch("zettle_client.requests.post")

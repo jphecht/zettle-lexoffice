@@ -2,7 +2,14 @@
 import unittest
 from decimal import Decimal
 
-from aggregator import DailySummary, SERVICE_PRODUCT_NAMES, aggregate, _product_gross, _vat_from_gross
+from aggregator import (
+    AggregationError,
+    DailySummary,
+    SERVICE_PRODUCT_NAMES,
+    aggregate,
+    _product_gross,
+    _vat_from_gross,
+)
 
 
 def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dict:
@@ -41,7 +48,8 @@ class TestProductGross(unittest.TestCase):
         self.assertEqual(_product_gross({"unitPrice": 1000, "quantity": "2"}), Decimal("20.00"))
 
     def test_invalid(self):
-        self.assertEqual(_product_gross({"unitPrice": "bad"}), Decimal("0"))
+        with self.assertRaises(AggregationError):
+            _product_gross({"unitPrice": "bad"})
 
 
 class TestAggregate(unittest.TestCase):
@@ -95,17 +103,61 @@ class TestAggregate(unittest.TestCase):
         self.assertAlmostEqual(float(s.card_sales_gross),   20.0, places=1)
         self.assertAlmostEqual(float(s.total_gross),       100.0, places=1)
 
-    def test_unknown_product_goes_to_sales(self):
-        s = aggregate([_purchase(sales_cents=5000)])  # "Verkauf" → sales
+    def test_unknown_product_is_rejected(self):
         p = {"products": [{"name": "Sonstiges", "unitPrice": 5000, "quantity": "1"}],
              "payments": [{"amount": 5000, "type": "CASH"}]}
-        s2 = aggregate([p])
-        self.assertEqual(s2.cash_sales_gross, Decimal("50.00"))
+        with self.assertRaises(AggregationError):
+            aggregate([p])
 
-    def test_non_dict_product_skipped(self):
+    def test_non_dict_product_is_rejected(self):
         p = {"products": [True, None, {"name": "Dienstleistung", "unitPrice": 1000, "quantity": "1"}],
              "payments": [{"amount": 1000, "type": "CASH"}]}
-        self.assertEqual(aggregate([p]).cash_service_gross, Decimal("10.00"))
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_unknown_payment_type_is_rejected(self):
+        p = _purchase(service_cents=1000, cash_cents=1000)
+        p["payments"][0]["type"] = "MYSTERY"
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_payment_product_mismatch_is_rejected(self):
+        p = _purchase(service_cents=1000, cash_cents=1200)
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_products_without_payment_are_rejected(self):
+        p = {"products": [{"name": "Verkauf", "unitPrice": 1000, "quantity": "1"}],
+             "payments": []}
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_fractional_minor_payment_is_rejected(self):
+        p = _purchase(service_cents=1000, cash_cents=1000)
+        p["payments"][0]["amount"] = "1000.5"
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_non_finite_product_is_rejected(self):
+        p = {"products": [{"name": "Verkauf", "unitPrice": "NaN", "quantity": "1"}],
+             "payments": [{"amount": 1000, "type": "CASH"}]}
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_refund_is_rejected(self):
+        p = {"products": [{"name": "Verkauf", "unitPrice": -1000, "quantity": "1"}],
+             "payments": [{"amount": -1000, "type": "CASH"}]}
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_mixed_payment_cent_balancing(self):
+        p = _purchase(service_cents=1, sales_cents=2, cash_cents=1, card_cents=2)
+        s = aggregate([p])
+        self.assertEqual(s.cash_gross, Decimal("0.01"))
+        self.assertEqual(s.card_gross, Decimal("0.02"))
+        self.assertEqual(s.service_gross, Decimal("0.01"))
+        self.assertEqual(s.sales_gross, Decimal("0.02"))
+        self.assertEqual(s.total_gross, Decimal("0.03"))
 
     def test_total_properties(self):
         s = aggregate([_purchase(service_cents=3800, sales_cents=3400, cash_cents=7200)])

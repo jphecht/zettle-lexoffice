@@ -18,7 +18,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from aggregator import DailySummary, aggregate
+from aggregator import AggregationError, DailySummary, aggregate
 from lexoffice_client import LexofficeAPIError, LexofficeClient
 from zettle_client import ZettleAPIError, ZettleClient
 
@@ -180,6 +180,8 @@ def _process_day(
 
     except ZettleAPIError as exc:
         return STATUS_FAILED, f"Zettle-Fehler: {exc}"
+    except AggregationError as exc:
+        return STATUS_FAILED, f"Buchungsprüfung fehlgeschlagen: {exc}"
     except LexofficeAPIError as exc:
         return STATUS_FAILED, f"Lexoffice-Fehler: {exc}"
     except Exception as exc:

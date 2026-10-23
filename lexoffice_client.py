@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 from datetime import date, datetime
@@ -12,13 +11,17 @@ from aggregator import DailySummary
 
 logger = logging.getLogger(__name__)
 
-LEXOFFICE_BASE_URL = "https://api.lexoffice.io/v1"
+LEXOFFICE_BASE_URL = "https://api.lexware.io/v1"
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 _REMARK_PREFIX = "zettle-import"
 
 
 class LexofficeAPIError(Exception):
     pass
+
+
+class LexofficeAmbiguousWriteError(LexofficeAPIError):
+    """A write may have reached Lexware Office although no result was received."""
 
 
 class LexofficeClient:
@@ -114,11 +117,18 @@ class LexofficeClient:
         payload = self._build_payload(business_date, summary, suffix)
         if dry_run:
             label = "BAR" if suffix == "bar" else "KARTE"
-            logger.info("[DRY-RUN] Would create %s voucher:\n%s",
-                        label, json.dumps(payload, indent=2, ensure_ascii=False))
+            logger.info(
+                "[DRY-RUN] Würde %s-Beleg für %s mit %.2f EUR und %d Position(en) anlegen",
+                label,
+                business_date,
+                payload["totalGrossAmount"],
+                len(payload["voucherItems"]),
+            )
             return None
         data = self._post("/vouchers", payload)
-        vid: str = data["id"]
+        vid = data.get("id")
+        if not isinstance(vid, str) or not vid:
+            raise LexofficeAPIError("Lexware-Antwort enthält keine Beleg-ID")
         logger.info("Lexoffice %s voucher created for %s → id=%s",
                     suffix.upper(), business_date, vid)
         return vid
@@ -176,7 +186,7 @@ class LexofficeClient:
         return self._request("GET", path, params=params)
 
     def _post(self, path: str, body: dict) -> dict:
-        return self._request("POST", path, json_body=body)
+        return self._request("POST", path, json_body=body, retry_mutating=False)
 
     def _request(
         self,
@@ -185,6 +195,7 @@ class LexofficeClient:
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
         max_retries: int = 3,
+        retry_mutating: bool = False,
     ) -> dict:
         url = LEXOFFICE_BASE_URL + path
         delay = 1.0
@@ -196,12 +207,30 @@ class LexofficeClient:
                 )
                 if resp.ok:
                     return resp.json() if resp.content else {}
-                if resp.status_code in (429, 500, 502, 503, 504):
+                if resp.status_code == 429:
+                    raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+                if resp.status_code in (500, 502, 503, 504):
+                    if method != "GET" and not retry_mutating:
+                        raise LexofficeAmbiguousWriteError(
+                            f"{method} {path} endete mit HTTP {resp.status_code}; "
+                            "der Beleg kann dennoch erstellt worden sein. "
+                            "Ein erneuter Programmlauf prüft zuerst auf Duplikate."
+                        )
                     raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
                 raise LexofficeAPIError(
-                    f"{method} {url} failed with HTTP {resp.status_code}: {resp.text}"
+                    f"{method} {path} failed with HTTP {resp.status_code}"
                 )
             except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                if method != "GET" and not retry_mutating and not (
+                    isinstance(exc, requests.HTTPError)
+                    and exc.response is not None
+                    and exc.response.status_code == 429
+                ):
+                    raise LexofficeAmbiguousWriteError(
+                        f"{method} {path} ohne eindeutige Antwort; der Beleg kann "
+                        "erstellt worden sein. Ein erneuter Programmlauf prüft "
+                        "zuerst auf Duplikate."
+                    ) from exc
                 if attempt == max_retries:
                     raise LexofficeAPIError(
                         f"{method} {url} failed after {max_retries} attempt(s): {exc}"

@@ -4,8 +4,17 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from aggregator import DailySummary, _vat_from_gross
-from lexoffice_client import LexofficeAPIError, LexofficeClient, _build_items, _item
+from lexoffice_client import (
+    LEXOFFICE_BASE_URL,
+    LexofficeAPIError,
+    LexofficeAmbiguousWriteError,
+    LexofficeClient,
+    _build_items,
+    _item,
+)
 
 API_KEY     = "test-api-key"
 SERVICE_CAT = "service-cat-uuid"
@@ -205,16 +214,40 @@ class TestCreateDailyVouchers(unittest.TestCase):
             ids = self.client.create_daily_vouchers(TEST_DATE, s)
         self.assertEqual(ids, [])
 
-    @patch("lexoffice_client.time.sleep")
-    def test_raises_after_max_retries(self, _sleep):
+    def test_post_503_is_not_retried(self):
         s = _summary(cash_service=100)
         with self._patch() as mock_req:
             mock_req.side_effect = [
                 _ok({"content": [], "last": True}),
-                _err(503), _err(503), _err(503),
+                _err(503),
+            ]
+            with self.assertRaises(LexofficeAmbiguousWriteError):
+                self.client.create_daily_vouchers(TEST_DATE, s)
+        self.assertEqual(mock_req.call_count, 2)
+
+    def test_post_timeout_is_not_retried(self):
+        s = _summary(cash_service=100)
+        with self._patch() as mock_req:
+            mock_req.side_effect = [
+                _ok({"content": [], "last": True}),
+                requests.Timeout("simulated"),
+            ]
+            with self.assertRaises(LexofficeAmbiguousWriteError):
+                self.client.create_daily_vouchers(TEST_DATE, s)
+        self.assertEqual(mock_req.call_count, 2)
+
+    def test_post_response_without_id_is_rejected(self):
+        s = _summary(cash_service=100)
+        with self._patch() as mock_req:
+            mock_req.side_effect = [
+                _ok({"content": [], "last": True}),
+                _ok({}),
             ]
             with self.assertRaises(LexofficeAPIError):
                 self.client.create_daily_vouchers(TEST_DATE, s)
+
+    def test_current_lexware_api_domain(self):
+        self.assertEqual(LEXOFFICE_BASE_URL, "https://api.lexware.io/v1")
 
 
 if __name__ == "__main__":

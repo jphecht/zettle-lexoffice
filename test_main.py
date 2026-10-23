@@ -138,6 +138,15 @@ class TestProcessDay(unittest.TestCase):
         self.assertEqual(status, STATUS_FAILED)
         self.assertIn("Lexoffice-Fehler", detail)
 
+    def test_failed_on_accounting_validation(self):
+        purchase = _purchase(service_cents=1000)
+        purchase["payments"][0]["amount"] = 1200
+        status, detail = _process_day(
+            TODAY, _mock_zettle([purchase]), _mock_lexoffice(), dry_run=False
+        )
+        self.assertEqual(status, STATUS_FAILED)
+        self.assertIn("Buchungsprüfung", detail)
+
     def test_detail_shows_bar_karte_split(self):
         zettle = _mock_zettle([_purchase(service_cents=11900)])
         lexoffice = _mock_lexoffice(["bar-id"])

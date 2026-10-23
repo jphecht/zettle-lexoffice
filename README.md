@@ -1,13 +1,23 @@
-# Zettle → Lexoffice
+# Zettle → Lexware Office
 
-Überträgt die Tageseinnahmen aus dem Zettle POS automatisch als Sammelbeleg nach Lexoffice.
+Überträgt Tageseinnahmen aus Zettle (PayPal POS) als Sammelbelege nach
+Lexware Office. Das Projekt ist unabhängig und nicht mit PayPal oder Lexware
+verbunden.
 
 **Was das Script macht:**
 - Ruft alle Kassenvorgänge eines Tages über die Zettle Purchase API ab
 - Trennt Kartenzahlungen und Barzahlungen
 - Rechnet 19 % MwSt heraus (Brutto → Netto + Steuer)
-- Legt einen Tagessammelbeleg (`salesinvoice`) in Lexoffice an
+- Legt je einen Bar- und Karten-Sammelbeleg (`salesinvoice`) in Lexware Office an
 - Schützt vor Doppel-Import und überspringt umsatzlose Tage
+- Bricht bei unbekannten oder nicht abgestimmten Daten ab, statt sie zu schätzen
+
+> **Wichtige Einschränkung:** Unterstützt werden derzeit nur die Produktnamen
+> `Dienstleistung`, `Beispiel Zusatzleistung` und `Verkauf`, 19 % Umsatzsteuer sowie
+> positive Bar- und Kartenzahlungen.
+> Trinkgeld, Rabatte, Gutscheine, Gebühren, Stornos und Rückerstattungen werden
+> nicht automatisch verbucht. Erkennt das Programm solche Abweichungen, legt es
+> keinen Beleg an.
 
 ---
 
@@ -15,7 +25,7 @@
 
 - Python 3.11 oder neuer
 - Ein aktiver Zettle-Account (PayPal POS)
-- Ein aktiver Lexoffice-Account
+- Ein aktiver Lexware-Office-Account
 
 ---
 
@@ -31,10 +41,11 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
 # 3. Abhängigkeiten installieren
-pip install -r requirements.txt
+pip install -r requirements.lock
 
 # 4. .env anlegen
 cp .env.example .env
+chmod 600 .env
 ```
 
 ---
@@ -63,9 +74,9 @@ cp .env.example .env
 
 ---
 
-### Schritt 2 — Lexoffice API-Key erstellen
+### Schritt 2 — Lexware-Office-API-Key erstellen
 
-1. Lexoffice öffnen → Profilbild (rechts oben) → **Mein Konto**
+1. Lexware Office öffnen → Profilbild (rechts oben) → **Mein Konto**
 2. Linke Navigation: **API & Integrationen** → **API-Keys**
 3. *Neuen API-Key erstellen* → Name: `Zettle Import`
 4. Den Key sofort kopieren (wird danach nicht mehr angezeigt)
@@ -78,7 +89,7 @@ cp .env.example .env
 
 ### Schritt 3 — Kategorie- und Kontakt-IDs eintragen
 
-Lexoffice ordnet Dienstleistung und Warenverkauf jeweils einer Kategorie
+Lexware Office ordnet Dienstleistung und Warenverkauf jeweils einer Kategorie
 (= Buchungskonto) zu. Außerdem benötigt jeder Sammelbeleg einen Kontakt.
 
 Die UUIDs der Kategorien ermitteln:
@@ -134,7 +145,7 @@ python main.py --date 2025-01-15
 # Zeitraum importieren (Bulk)
 python main.py --from 2025-01-01 --to 2025-05-31
 
-# Trockenlauf — kein Schreibzugriff auf Lexoffice
+# Trockenlauf — liest Zettle, schreibt aber nicht in Lexware Office
 python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
 ```
 
@@ -157,7 +168,7 @@ python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
 
 ---
 
-## Tägliche Automatisierung (Cron)
+## Automatisierung (Cron)
 
 Damit das Script jeden Morgen automatisch den Vortag importiert:
 
@@ -178,12 +189,21 @@ Den korrekten Pfad ermitteln:
 pwd   # zeigt das aktuelle Verzeichnis
 ```
 
+Für eine monatliche Übertragung am 5. muss der konkrete Zeitraum berechnet
+werden; ein bloßer Aufruf ohne Argumente importiert nur den Vortag. Nutze dafür
+ein separates Wrapper-Skript oder einen Scheduler, der `--from` und `--to` auf
+den vollständigen Vormonat setzt. Führe eine Automatisierung zuerst manuell mit
+`--dry-run` aus und stelle sicher, dass nicht mehrere Instanzen parallel laufen.
+
 ---
 
 ## Logs
 
 Tägliche Logdateien liegen unter `logs/YYYY-MM-DD.log`.
-Die Konsolenausgabe zeigt INFO-Level, die Datei enthält zusätzlich DEBUG-Meldungen (HTTP-Details, Paginierung).
+Die Konsolenausgabe zeigt INFO-Level, die Datei enthält zusätzlich
+DEBUG-Meldungen. Zugangsschlüssel werden nicht protokolliert. Logs können aber
+Geschäftsdaten wie Datum, Summen und Beleg-IDs enthalten und gehören nicht ins
+Repository oder in öffentliche Fehlerberichte.
 
 Der Prozess gibt **Exit-Code 1** zurück, wenn mindestens ein Tag fehlgeschlagen ist — geeignet für Monitoring oder Cron-Benachrichtigungen.
 
@@ -195,10 +215,14 @@ Der Prozess gibt **Exit-Code 1** zurück, wenn mindestens ein Tag fehlgeschlagen
 zettle-lexoffice/
 ├── main.py               # CLI-Einstiegspunkt & Orchestrierung
 ├── zettle_client.py      # Zettle Purchase API (OAuth2/JWT, Pagination, Retry)
-├── lexoffice_client.py   # Lexoffice API (Voucher-Erstellung, Duplikat-Prüfung)
+├── lexoffice_client.py   # Lexware API (Voucher-Erstellung, Duplikat-Prüfung)
 ├── aggregator.py         # MwSt-Herausrechnung, Karte/Bar-Trennung
 ├── requirements.txt
+├── requirements.lock     # reproduzierbar geprüfte Paketversionen
+├── SECURITY.md
+├── THIRD_PARTY_NOTICES.md
 ├── .env.example
+├── .github/workflows/ci.yml
 └── logs/                 # täglich rotierte Logdateien (in .gitignore)
 ```
 
@@ -211,7 +235,10 @@ zettle-lexoffice/
 | Tag ohne Umsatz | Übersprungen, kein leerer Beleg |
 | Beleg für diesen Tag existiert bereits | Übersprungen (Duplikatschutz) |
 | Zettle-API antwortet nicht | 3 Versuche mit exponentiellem Backoff (1s → 2s → 4s) |
-| Lexoffice-API antwortet nicht | wie oben |
+| Lexware-GET antwortet vorübergehend nicht | Bis zu 3 Versuche mit Backoff |
+| Lexware-POST endet uneindeutig | Kein blindes Wiederholen; nächster Lauf prüft zuerst den Duplikatmarker |
+| Unbekannter Zahlungs-/Produkt-Typ | Tag schlägt fehl, kein Beleg wird angelegt |
+| Zahlungs- und Produktsumme weichen ab | Tag schlägt fehl, kein Beleg wird angelegt |
 | Ungültige Credentials | Sofortiger Abbruch mit Fehlermeldung |
 | Fehlende `.env`-Variable | Abbruch vor dem ersten API-Call |
 
@@ -223,4 +250,31 @@ zettle-lexoffice/
 python -m unittest discover -v
 ```
 
-70 Tests, keine externen API-Aufrufe (alle HTTP-Calls gemockt).
+Die Tests führen keine externen API-Aufrufe aus; alle HTTP-Calls sind gemockt.
+GitHub Actions führt sie unter Python 3.11 bis 3.13 aus und scannt versionierte
+Dateien sowie die Git-Historie auf typische Zugangsdatenmuster.
+
+## Technische Annahmen und Duplikatschutz
+
+- Ein Geschäftstag entspricht Mitternacht bis Mitternacht in
+  `Europe/Berlin`, einschließlich Sommer-/Winterzeit.
+- Die Summen aus Zahlungs- und Produktpositionen müssen centgenau
+  übereinstimmen.
+- Belege tragen einen stabilen Marker wie `zettle-import-YYYY-MM-DD-bar`.
+  Vor dem Schreiben wird in Lexware Office danach gesucht.
+- Der Schutz verhindert normale Wiederholungen, ersetzt aber keine serverseitige
+  Idempotenz und schützt nicht sicher vor zwei gleichzeitig laufenden Instanzen.
+
+## Entwicklung und Sicherheit
+
+```bash
+python -m unittest discover -v
+python scripts/check_secrets.py
+```
+
+Bitte lies vor Beiträgen [SECURITY.md](SECURITY.md). Drittanbieter-Lizenzen sind
+in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) dokumentiert.
+
+## Lizenz
+
+Apache License 2.0. Siehe [LICENSE](LICENSE).
