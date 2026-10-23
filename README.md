@@ -262,6 +262,26 @@ kann die Prüfung später vor einen Monatsimport oder eine Automatisierung
 geschaltet werden. Der Katalog ersetzt keine Prüfung der tatsächlichen
 Gutscheinbedingungen; die Branche bleibt nur eine Vorauswahl.
 
+#### Konfigurationsvorschlag erzeugen
+
+Aus dem gelesenen Katalog kann ein JSON-Entwurf erzeugt werden:
+
+```bash
+python main.py --propose-config
+```
+
+Die Ausgabe erfolgt ausschließlich auf der Konsole. Bestehende Regeln bleiben
+erhalten; für unbekannte Produkte werden getrennte Platzhalter-Kategorien
+angelegt. Gutscheinprodukte, widersprüchliche Steuersätze und ungeklärte
+0-%-Produkte werden im `_review`-Abschnitt aufgeführt.
+
+Jeder Entwurf enthält `"proposalStatus": "reviewRequired"` und wird vom
+normalen Import absichtlich abgelehnt. Erst nachdem Produktzuordnungen,
+Lexware-Kategorien, 0-%-Steuergründe und Gutscheinbedingungen geprüft wurden,
+darf der Status manuell auf `confirmed` gesetzt und die Datei als
+`accounting.json` übernommen werden. Das Programm überschreibt niemals eine
+bestehende Konfiguration.
+
 ---
 
 ### Fertige `.env`
@@ -304,6 +324,9 @@ python main.py --review-gift-cards
 
 # Zettle-Produktkatalog nur lesend prüfen — kein Lexware-Aufruf
 python main.py --review-catalog
+
+# Unbestätigten Konfigurationsentwurf auf der Konsole ausgeben
+python main.py --propose-config
 ```
 
 ### Beispielausgabe (Bulk-Import)
@@ -377,6 +400,7 @@ zettle-lexoffice/
 ├── accounting.example.json
 ├── aggregator.py         # Aggregation nach Zahlungsart, Kategorie und Steuer
 ├── catalog_review.py     # lesende Produkt- und Steuersatzprüfung
+├── config_proposal.py    # sicherer, unbestätigter Konfigurationsentwurf
 ├── requirements.txt
 ├── requirements.lock     # reproduzierbar geprüfte Paketversionen
 ├── SECURITY.md

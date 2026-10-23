@@ -18,6 +18,7 @@ class CatalogReview:
     gift_card_products: set[str] = field(default_factory=set)
     zero_rate_products: set[str] = field(default_factory=set)
     configured_but_missing: set[str] = field(default_factory=set)
+    product_vat_rates: dict[str, frozenset[Decimal]] = field(default_factory=dict)
     redeemable_vat_rates: set[Decimal] = field(default_factory=set)
     gift_card_recommendation: str | None = None
 
@@ -100,6 +101,7 @@ def review_product_catalog(
             if rate == 0:
                 review.zero_rate_products.add(name)
         review.variant_count += valid_variants
+        review.product_vat_rates[name] = frozenset(product_rates)
 
         if is_gift_card:
             continue
