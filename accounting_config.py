@@ -103,7 +103,7 @@ DEFAULT_CONFIG = AccountingConfig(
     currency="EUR",
     product_rules=(
         ProductRule(
-            names=frozenset({"Dienstleistung", "Beispiel Zusatzleistung"}),
+            names=frozenset({"Dienstleistung"}),
             category="service",
             vat_rate=Decimal("19"),
         ),
@@ -121,7 +121,7 @@ DEFAULT_CONFIG = AccountingConfig(
 
 
 def load_accounting_config(path: Optional[str]) -> AccountingConfig:
-    """Load JSON configuration, or return the legacy-compatible default."""
+    """Load JSON configuration, or return the generic review default."""
     if not path:
         return DEFAULT_CONFIG
     config_path = Path(path).expanduser()

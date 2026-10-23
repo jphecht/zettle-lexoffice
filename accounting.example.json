@@ -16,12 +16,12 @@
   },
   "products": [
     {
-      "names": ["Dienstleistung", "Beispiel Zusatzleistung"],
+      "names": ["Beispiel Dienstleistung"],
       "category": "service",
       "vatRate": "19"
     },
     {
-      "names": ["Verkauf"],
+      "names": ["Beispiel Handelsware"],
       "category": "sales",
       "vatRate": "19"
     }

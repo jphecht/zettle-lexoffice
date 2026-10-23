@@ -140,7 +140,6 @@ class TestCatalogReviewCommand(unittest.TestCase):
         )
         mock_zettle_class.return_value.get_products.return_value = [
             {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
-            {"name": "Beispiel Zusatzleistung", "variants": [{"vatPercentage": 19}]},
             {"name": "Verkauf", "variants": [{"vatPercentage": 19}]},
         ]
         with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
@@ -217,6 +216,18 @@ class TestPreflightCommand(unittest.TestCase):
         )
         mock_lexoffice_class.assert_not_called()
         mock_setup_logging.assert_not_called()
+
+
+class TestClientConfiguration(unittest.TestCase):
+    def test_productive_import_requires_explicit_accounting_config(self):
+        environment = {
+            "ZETTLE_API_KEY": "test",
+            "LEXOFFICE_API_KEY": "test",
+            "LEXOFFICE_CONTACT_ID": "test",
+        }
+        with patch.dict("main.os.environ", environment, clear=True):
+            with self.assertRaisesRegex(SystemExit, "ACCOUNTING_CONFIG"):
+                main_module._load_clients()
 
 
 class TestProcessDay(unittest.TestCase):

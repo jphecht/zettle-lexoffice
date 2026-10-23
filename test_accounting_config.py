@@ -40,11 +40,13 @@ class TestAccountingConfig(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             return load_accounting_config(str(path))
 
-    def test_default_preserves_existing_mapping(self):
+    def test_default_is_generic_and_available_for_reviews(self):
         self.assertEqual(load_accounting_config(None), DEFAULT_CONFIG)
         self.assertEqual(
             DEFAULT_CONFIG.rule_for_product("Dienstleistung").category, "service"
         )
+        with self.assertRaises(ConfigurationError):
+            DEFAULT_CONFIG.rule_for_product("Nicht konfiguriertes Produkt")
 
     def test_example_configuration_is_valid(self):
         example = Path(__file__).with_name("accounting.example.json")

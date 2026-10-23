@@ -14,10 +14,10 @@ verbunden.
 - Schützt vor Doppel-Import und überspringt umsatzlose Tage
 - Bricht bei unbekannten oder nicht abgestimmten Daten ab, statt sie zu schätzen
 
-> **Wichtige Einschränkung:** Ohne eigene Konfiguration bleibt das bisherige
-> Verhalten mit `Dienstleistung`, `Beispiel Zusatzleistung`, `Verkauf` und 19 % erhalten.
-> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze, Rabatte,
-> Trinkgeldregeln und Rückerstattungen konfigurieren. Gutscheine, Gebühren und
+> **Wichtige Einschränkung:** Ein produktiver Import erfordert immer eine
+> ausdrücklich eingerichtete lokale `accounting.json`. Darin werden Namen,
+> Kategorien, Steuersätze, Rabatte, Trinkgeldregeln und Rückerstattungen
+> konfiguriert. Gutscheine, Gebühren und
 > sonstige Stornos bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
 > Abweichung, legt es keinen Beleg an.
 
@@ -118,10 +118,10 @@ LEXOFFICE_SALES_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 LEXOFFICE_CONTACT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-### Schritt 4 — Eigene Produkte und Steuersätze konfigurieren (optional)
+### Schritt 4 — Eigene Produkte und Steuersätze konfigurieren
 
-Ohne weitere Einstellung bleibt die bisherige, erprobte Zuordnung aktiv. Für
-eigene Produktnamen oder zusätzliche Steuersätze:
+Vor dem ersten produktiven Import muss eine eigene Buchungskonfiguration
+angelegt werden:
 
 ```bash
 cp accounting.example.json accounting.json
@@ -318,7 +318,7 @@ LEXOFFICE_SALES_CATEGORY_ID=...
 LEXOFFICE_OWNER_TIPS_CATEGORY_ID=...
 LEXOFFICE_EMPLOYEE_TIPS_CATEGORY_ID=...
 LEXOFFICE_CONTACT_ID=...
-# Nur bei eigener Datei erforderlich:
+# Für produktive Übertragungen erforderlich:
 ACCOUNTING_CONFIG=accounting.json
 ```
 

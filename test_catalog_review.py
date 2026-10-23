@@ -20,15 +20,14 @@ class TestCatalogReview(unittest.TestCase):
         review = review_product_catalog(
             [
                 _product("Dienstleistung", "19"),
-                _product("Beispiel Zusatzleistung", 19),
                 _product("Verkauf", "19.0"),
             ],
             DEFAULT_CONFIG,
         )
         self.assertFalse(review.blockers)
         self.assertEqual(review.vat_rates, {Decimal("19")})
-        self.assertEqual(review.product_count, 3)
-        self.assertEqual(review.variant_count, 3)
+        self.assertEqual(review.product_count, 2)
+        self.assertEqual(review.variant_count, 2)
 
     def test_unknown_product_is_blocker(self):
         review = review_product_catalog(
@@ -57,12 +56,10 @@ class TestCatalogReview(unittest.TestCase):
             ),
         )
         review = review_product_catalog(
-            [_product("Dienstleistung", 0), _product("Beispiel Zusatzleistung", 0)], config
+            [_product("Dienstleistung", 0)], config
         )
         self.assertTrue(review.blockers)
-        self.assertEqual(
-            review.zero_rate_products, {"Dienstleistung", "Beispiel Zusatzleistung"}
-        )
+        self.assertEqual(review.zero_rate_products, {"Dienstleistung"})
 
     def test_tax_exempt_variant_without_percentage_is_treated_as_zero(self):
         config = replace(

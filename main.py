@@ -186,8 +186,16 @@ def _load_clients() -> tuple[ZettleClient, LexofficeClient, AccountingConfig]:
             + "\n".join(f"  {k}" for k in missing)
         )
 
+    config_path = os.environ.get("ACCOUNTING_CONFIG", "").strip()
+    if not config_path:
+        sys.exit(
+            "Produktive Übertragungen erfordern eine bestätigte "
+            "Buchungskonfiguration. ACCOUNTING_CONFIG in .env setzen "
+            "(zum Beispiel ACCOUNTING_CONFIG=accounting.json)."
+        )
+
     try:
-        config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        config = load_accounting_config(config_path)
         category_ids = config.category_ids()
     except ConfigurationError as exc:
         sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
