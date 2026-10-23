@@ -101,6 +101,18 @@ class TestAccountingConfig(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             self._load(data)
 
+    def test_unconfirmed_generated_proposal_is_rejected(self):
+        data = _valid_config()
+        data["proposalStatus"] = "reviewRequired"
+        with self.assertRaisesRegex(ConfigurationError, "noch nicht bestätigt"):
+            self._load(data)
+
+    def test_confirmed_generated_proposal_can_be_loaded(self):
+        data = _valid_config()
+        data["proposalStatus"] = "confirmed"
+        config = self._load(data)
+        self.assertEqual(config.currency, "EUR")
+
     def test_separate_refund_credit_notes_can_be_enabled(self):
         data = _valid_config()
         data["adjustments"]["refunds"] = "separateCreditNote"

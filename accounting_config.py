@@ -140,6 +140,17 @@ def _parse_config(raw: object) -> AccountingConfig:
     if not isinstance(raw, dict):
         raise ConfigurationError("Die Buchungskonfiguration muss ein JSON-Objekt sein")
 
+    proposal_status = raw.get("proposalStatus")
+    if proposal_status == "reviewRequired":
+        raise ConfigurationError(
+            "Konfigurationsvorschlag ist noch nicht bestätigt; "
+            "Platzhalter prüfen und proposalStatus auf confirmed setzen"
+        )
+    if proposal_status not in {None, "confirmed"}:
+        raise ConfigurationError(
+            "proposalStatus muss reviewRequired oder confirmed sein"
+        )
+
     currency = raw.get("currency", "EUR")
     if currency != "EUR":
         raise ConfigurationError("Derzeit wird ausschließlich EUR unterstützt")

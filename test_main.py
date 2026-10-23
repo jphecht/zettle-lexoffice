@@ -136,6 +136,7 @@ class TestCatalogReviewCommand(unittest.TestCase):
             dry_run=False,
             review_gift_cards=False,
             review_catalog=True,
+            propose_config=False,
         )
         mock_zettle_class.return_value.get_products.return_value = [
             {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
@@ -148,6 +149,33 @@ class TestCatalogReviewCommand(unittest.TestCase):
 
         self.assertIn("Katalogprüfung ohne Blocker", stdout.getvalue())
         mock_zettle_class.return_value.get_products.assert_called_once_with()
+        mock_setup_logging.assert_not_called()
+
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_config_proposal_is_json_and_skips_lexware(
+        self, mock_args, mock_zettle_class, mock_setup_logging, _mock_load_dotenv
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date=None,
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            review_gift_cards=False,
+            review_catalog=False,
+            propose_config=True,
+        )
+        mock_zettle_class.return_value.get_products.return_value = [
+            {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
+        ]
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        proposal = __import__("json").loads(stdout.getvalue())
+        self.assertEqual(proposal["proposalStatus"], "reviewRequired")
         mock_setup_logging.assert_not_called()
 
 
