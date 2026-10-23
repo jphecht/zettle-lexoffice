@@ -10,6 +10,7 @@ Verwendung:
   python main.py --review-gift-cards                 # nur lokale Vorprüfung
   python main.py --review-catalog                    # Zettle nur lesend
   python main.py --propose-config                    # JSON-Entwurf auf stdout
+  python main.py --from 2026-09-01 --to 2026-09-30 --preflight
 """
 import argparse
 import json
@@ -32,6 +33,7 @@ from aggregator import AggregationError, DailySummary, aggregate
 from catalog_review import format_catalog_review, review_product_catalog
 from config_proposal import build_config_proposal
 from lexoffice_client import LexofficeAPIError, LexofficeClient
+from preflight_report import build_preflight_report, format_preflight_report
 from zettle_client import ZettleAPIError, ZettleClient
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -103,6 +105,10 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Kein Schreibzugriff auf Lexoffice — Payload wird nur geloggt",
     )
+    p.add_argument(
+        "--preflight", action="store_true",
+        help="Zeitraum nur aus Zettle prüfen; kein Lexware-Zugriff",
+    )
     args = p.parse_args()
 
     if args.from_date and not args.to_date:
@@ -113,8 +119,10 @@ def _parse_args() -> argparse.Namespace:
         args.review_gift_cards
         or args.review_catalog
         or args.propose_config
-    ) and args.dry_run:
-        p.error("Prüfmodi können nicht mit --dry-run kombiniert werden")
+    ) and (args.dry_run or args.preflight):
+        p.error("Katalog-/Konfigurationsprüfungen sind nicht kombinierbar")
+    if args.preflight and args.dry_run:
+        p.error("--preflight kann nicht mit --dry-run kombiniert werden")
 
     return args
 
@@ -299,6 +307,26 @@ def main() -> None:
         except ZettleAPIError as exc:
             sys.exit(f"Zettle-Fehler: {exc}")
         print(json.dumps(proposal, ensure_ascii=False, indent=2))
+        return
+
+    if args.preflight:
+        api_key = os.environ.get("ZETTLE_API_KEY", "")
+        if not api_key:
+            sys.exit("Fehlende Umgebungsvariable in .env: ZETTLE_API_KEY")
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        days = _build_date_range(args)
+        report = build_preflight_report(
+            days,
+            ZettleClient(api_key),
+            config,
+            pause_seconds=1,
+        )
+        print(format_preflight_report(report))
+        if report.blockers:
+            sys.exit(1)
         return
 
     _setup_logging()

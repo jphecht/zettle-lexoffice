@@ -181,6 +181,44 @@ class TestCatalogReviewCommand(unittest.TestCase):
 
 # ── _process_day ──────────────────────────────────────────────────────────────
 
+class TestPreflightCommand(unittest.TestCase):
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.LexofficeClient")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_preflight_reads_zettle_without_lexware(
+        self,
+        mock_args,
+        mock_zettle_class,
+        mock_lexoffice_class,
+        mock_setup_logging,
+        _mock_load_dotenv,
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date="2026-09-01",
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            preflight=True,
+            review_gift_cards=False,
+            review_catalog=False,
+            propose_config=False,
+        )
+        mock_zettle_class.return_value.get_purchases_for_day.return_value = []
+
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        self.assertIn("KEINE TECHNISCHEN BLOCKER", stdout.getvalue())
+        mock_zettle_class.return_value.get_purchases_for_day.assert_called_once_with(
+            date(2026, 9, 1)
+        )
+        mock_lexoffice_class.assert_not_called()
+        mock_setup_logging.assert_not_called()
+
+
 class TestProcessDay(unittest.TestCase):
     def test_ok_cash_only(self):
         zettle    = _mock_zettle([_purchase(service_cents=11900)])
