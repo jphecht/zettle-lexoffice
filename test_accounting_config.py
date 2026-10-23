@@ -98,6 +98,18 @@ class TestAccountingConfig(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             self._load(data)
 
+    def test_separate_refund_credit_notes_can_be_enabled(self):
+        data = _valid_config()
+        data["adjustments"]["refunds"] = "separateCreditNote"
+        config = self._load(data)
+        self.assertEqual(config.refund_mode, "separateCreditNote")
+
+    def test_unknown_refund_mode_is_rejected(self):
+        data = _valid_config()
+        data["adjustments"]["refunds"] = "netWithSales"
+        with self.assertRaises(ConfigurationError):
+            self._load(data)
+
     def test_loads_cashier_tip_rules(self):
         data = _valid_config()
         data["adjustments"]["tips"] = {

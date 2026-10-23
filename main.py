@@ -181,12 +181,21 @@ def _process_day(
             f"{category} {gross:.2f} €"
             for category, gross in summary.category_totals().items()
         )
-        detail = (
-            f"Brutto {summary.total_gross:.2f} €"
-            f"  Bar {summary.cash_gross:.2f} €"
-            f"  Karte {summary.card_gross:.2f} €"
-            f"  ({category_detail})"
+        refund_detail = ", ".join(
+            f"{category} {gross:.2f} €"
+            for category, gross in summary.refund_category_totals().items()
         )
+        detail = (
+            f"Umsatz {summary.total_gross:.2f} €"
+            f"  Erstattungen {summary.refund_total_gross:.2f} €"
+            f"  Netto {summary.net_gross:.2f} €"
+            f"  Bar {summary.cash_gross - summary.refund_cash_gross:.2f} €"
+            f"  Karte {summary.card_gross - summary.refund_card_gross:.2f} €"
+        )
+        if category_detail:
+            detail += f"  Umsatz-Kategorien ({category_detail})"
+        if refund_detail:
+            detail += f"  Erstattungs-Kategorien ({refund_detail})"
         if dry_run:
             return STATUS_OK, "[DRY-RUN] " + detail
         return STATUS_OK, detail + f"  ids={created}"

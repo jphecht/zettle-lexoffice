@@ -24,6 +24,8 @@ TEST_DATE     = date(2025, 1, 15)
 TEST_DATE_STR = "2025-01-15"
 BAR_MARKER   = f"zettle-import-{TEST_DATE_STR}-bar"
 KARTE_MARKER = f"zettle-import-{TEST_DATE_STR}-karte"
+BAR_REFUND_MARKER = f"zettle-import-{TEST_DATE_STR}-bar-refund"
+KARTE_REFUND_MARKER = f"zettle-import-{TEST_DATE_STR}-karte-refund"
 
 
 def _make_client() -> LexofficeClient:
@@ -35,12 +37,19 @@ def _make_client() -> LexofficeClient:
 def _summary(
     cash_service=0, cash_sales=0,
     card_service=0, card_sales=0,
+    refund_cash_service=0, refund_card_service=0,
 ) -> DailySummary:
     summary = DailySummary()
     summary.add("cash", "service", Decimal("19"), Decimal(str(cash_service)))
     summary.add("cash", "sales", Decimal("19"), Decimal(str(cash_sales)))
     summary.add("card", "service", Decimal("19"), Decimal(str(card_service)))
     summary.add("card", "sales", Decimal("19"), Decimal(str(card_sales)))
+    summary.add_refund(
+        "cash", "service", Decimal("19"), Decimal(str(refund_cash_service))
+    )
+    summary.add_refund(
+        "card", "service", Decimal("19"), Decimal(str(refund_card_service))
+    )
     return summary
 
 
@@ -114,6 +123,17 @@ class TestBuildPayload(unittest.TestCase):
     def test_voucher_date_uses_documented_date_format(self):
         self.assertEqual(self._bar()["voucherDate"], TEST_DATE_STR)
 
+    def test_refund_payload_is_separate_sales_credit_note(self):
+        summary = _summary(refund_card_service=59.50)
+        payload = self.client._build_payload(
+            TEST_DATE, summary, "karte", refund=True
+        )
+        self.assertEqual(payload["type"], "salescreditnote")
+        self.assertEqual(payload["totalGrossAmount"], 59.50)
+        self.assertEqual(payload["remark"], KARTE_REFUND_MARKER)
+        self.assertIn("REFUND", payload["voucherNumber"])
+        self.assertIn("Tagesgutschrift", payload["introduction"])
+
 
 class TestBuildItems(unittest.TestCase):
     def test_empty_when_all_zero(self):
@@ -152,6 +172,17 @@ class TestBuildItems(unittest.TestCase):
         with self.assertRaises(LexofficeAPIError):
             _build_items(summary, "cash", {})
 
+    def test_refund_items_use_positive_credit_amounts(self):
+        summary = _summary(refund_cash_service=119)
+        items = _build_items(
+            summary,
+            "cash",
+            {"service": SERVICE_CAT},
+            refund=True,
+        )
+        self.assertEqual(items[0]["amount"], 119.0)
+        self.assertEqual(items[0]["taxAmount"], 19.0)
+
 
 # ── create_daily_vouchers ─────────────────────────────────────────────────────
 
@@ -167,6 +198,15 @@ class TestCreateDailyVouchers(unittest.TestCase):
             mock_req.return_value = _ok({"content": [], "last": True})
             self.client.vouchers_exist_for_date(TEST_DATE)
         self.assertEqual(mock_req.call_args.kwargs["params"]["voucherStatus"], "any")
+
+    def test_duplicate_search_includes_sales_and_credit_notes(self):
+        with self._patch() as mock_req:
+            mock_req.return_value = _ok({"content": [], "last": True})
+            self.client.vouchers_exist_for_date(TEST_DATE)
+        self.assertEqual(
+            mock_req.call_args.kwargs["params"]["voucherType"],
+            "salesinvoice,salescreditnote",
+        )
 
     def test_cash_only_creates_bar_voucher(self):
         s = _summary(cash_service=100)
@@ -198,6 +238,54 @@ class TestCreateDailyVouchers(unittest.TestCase):
             ]
             ids = self.client.create_daily_vouchers(TEST_DATE, s)
         self.assertEqual(ids, ["bar-id", "karte-id"])
+
+    def test_refund_only_creates_sales_credit_note(self):
+        summary = _summary(refund_card_service=50)
+        with self._patch() as mock_req:
+            mock_req.side_effect = [
+                _ok({"content": [], "last": True}),
+                _ok({"id": "refund-id"}),
+            ]
+            ids = self.client.create_daily_vouchers(TEST_DATE, summary)
+        self.assertEqual(ids, ["refund-id"])
+        payload = mock_req.call_args.kwargs["json"]
+        self.assertEqual(payload["type"], "salescreditnote")
+
+    def test_sale_and_refund_create_independent_vouchers(self):
+        summary = _summary(card_service=100, refund_card_service=25)
+        with self._patch() as mock_req:
+            mock_req.side_effect = [
+                _ok({"content": [], "last": True}),
+                _ok({"id": "sale-id"}),
+                _ok({"id": "refund-id"}),
+            ]
+            ids = self.client.create_daily_vouchers(TEST_DATE, summary)
+        self.assertEqual(ids, ["sale-id", "refund-id"])
+        posted_types = [
+            call.kwargs["json"]["type"]
+            for call in mock_req.call_args_list
+            if call.args[0] == "POST"
+        ]
+        self.assertEqual(posted_types, ["salesinvoice", "salescreditnote"])
+
+    @patch("lexoffice_client.time.sleep")
+    def test_existing_refund_does_not_hide_sale_or_duplicate_credit(self, _sleep):
+        summary = _summary(card_service=100, refund_card_service=25)
+        with self._patch() as mock_req:
+            mock_req.side_effect = [
+                _ok({"content": [{"id": "existing-refund"}], "last": True}),
+                _ok({"id": "existing-refund", "remark": KARTE_REFUND_MARKER}),
+                _ok({"id": "sale-id"}),
+            ]
+            ids = self.client.create_daily_vouchers(TEST_DATE, summary)
+        self.assertEqual(ids, ["sale-id"])
+        posted = [
+            call.kwargs["json"]
+            for call in mock_req.call_args_list
+            if call.args[0] == "POST"
+        ]
+        self.assertEqual(len(posted), 1)
+        self.assertEqual(posted[0]["type"], "salesinvoice")
 
     def test_dry_run_makes_no_http_call(self):
         s = _summary(cash_service=100, card_service=50)

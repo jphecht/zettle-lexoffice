@@ -40,6 +40,7 @@ class SummaryLine:
 @dataclass
 class DailySummary:
     lines: dict[tuple[str, Decimal], SummaryLine] = field(default_factory=dict)
+    refund_lines: dict[tuple[str, Decimal], SummaryLine] = field(default_factory=dict)
 
     def add(
         self,
@@ -48,10 +49,31 @@ class DailySummary:
         vat_rate: Decimal,
         gross: Decimal,
     ) -> None:
+        self._add_to(self.lines, payment_method, category, vat_rate, gross)
+
+    def add_refund(
+        self,
+        payment_method: str,
+        category: str,
+        vat_rate: Decimal,
+        gross: Decimal,
+    ) -> None:
+        self._add_to(self.refund_lines, payment_method, category, vat_rate, gross)
+
+    @staticmethod
+    def _add_to(
+        lines: dict[tuple[str, Decimal], SummaryLine],
+        payment_method: str,
+        category: str,
+        vat_rate: Decimal,
+        gross: Decimal,
+    ) -> None:
         if gross == 0:
             return
+        if gross < 0:
+            raise AggregationError("Zusammenfassungsbeträge dürfen nicht negativ sein")
         key = (category, vat_rate)
-        line = self.lines.setdefault(key, SummaryLine(category, vat_rate))
+        line = lines.setdefault(key, SummaryLine(category, vat_rate))
         if payment_method == "cash":
             line.cash_gross += gross
         elif payment_method == "card":
@@ -60,10 +82,19 @@ class DailySummary:
             raise AggregationError(f"Unbekannte Zahlungsgruppe: {payment_method!r}")
 
     def items_for_payment(self, payment_method: str) -> list[SummaryLine]:
+        return self._items_for_payment(self.lines, payment_method)
+
+    def refund_items_for_payment(self, payment_method: str) -> list[SummaryLine]:
+        return self._items_for_payment(self.refund_lines, payment_method)
+
+    @staticmethod
+    def _items_for_payment(
+        lines: dict[tuple[str, Decimal], SummaryLine], payment_method: str
+    ) -> list[SummaryLine]:
         if payment_method not in {"cash", "card"}:
             raise AggregationError(f"Unbekannte Zahlungsgruppe: {payment_method!r}")
         attribute = f"{payment_method}_gross"
-        return [line for line in self.lines.values() if getattr(line, attribute) != 0]
+        return [line for line in lines.values() if getattr(line, attribute) != 0]
 
     def category_gross(self, category: str) -> Decimal:
         return sum(
@@ -72,8 +103,17 @@ class DailySummary:
         )
 
     def category_totals(self) -> dict[str, Decimal]:
+        return self._category_totals(self.lines)
+
+    def refund_category_totals(self) -> dict[str, Decimal]:
+        return self._category_totals(self.refund_lines)
+
+    @staticmethod
+    def _category_totals(
+        lines: dict[tuple[str, Decimal], SummaryLine]
+    ) -> dict[str, Decimal]:
         result: dict[str, Decimal] = {}
-        for line in self.lines.values():
+        for line in lines.values():
             result[line.category] = result.get(line.category, Decimal("0")) + line.gross
         return result
 
@@ -101,6 +141,33 @@ class DailySummary:
         return self.total_gross - self.total_vat
 
     @property
+    def refund_cash_gross(self) -> Decimal:
+        return sum(
+            (line.cash_gross for line in self.refund_lines.values()), Decimal("0")
+        )
+
+    @property
+    def refund_card_gross(self) -> Decimal:
+        return sum(
+            (line.card_gross for line in self.refund_lines.values()), Decimal("0")
+        )
+
+    @property
+    def refund_total_gross(self) -> Decimal:
+        return self.refund_cash_gross + self.refund_card_gross
+
+    @property
+    def refund_total_vat(self) -> Decimal:
+        return sum(
+            (line.cash_vat + line.card_vat for line in self.refund_lines.values()),
+            Decimal("0"),
+        )
+
+    @property
+    def net_gross(self) -> Decimal:
+        return self.total_gross - self.refund_total_gross
+
+    @property
     def has_cash(self) -> bool:
         return self.cash_gross > 0
 
@@ -108,8 +175,16 @@ class DailySummary:
     def has_card(self) -> bool:
         return self.card_gross > 0
 
+    @property
+    def has_cash_refund(self) -> bool:
+        return self.refund_cash_gross > 0
+
+    @property
+    def has_card_refund(self) -> bool:
+        return self.refund_card_gross > 0
+
     def is_empty(self) -> bool:
-        return self.total_gross == 0
+        return self.total_gross == 0 and self.refund_total_gross == 0
 
     @property
     def service_gross(self) -> Decimal:
@@ -195,15 +270,24 @@ def _process_purchase(
         raise AggregationError("Ungültiger Zettle-Kauf: Objekt erwartet")
     if purchase.get("currency") != config.currency:
         raise AggregationError(f"Nur Zettle-Käufe in {config.currency} werden unterstützt")
-    if purchase.get("refund") is True:
+    is_refund = purchase.get("refund") is True
+    if is_refund and config.refund_mode != "separateCreditNote":
         raise AggregationError(
-            "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
+            "Rückerstattungen sind nicht konfiguriert"
         )
+    if is_refund:
+        reference = (
+            purchase.get("refundsPurchaseUUID1")
+            or purchase.get("refundsPurchaseUUID")
+        )
+        if not isinstance(reference, str) or not reference.strip():
+            raise AggregationError("Zettle-Rückerstattung ohne Ursprungskauf-Referenz")
 
     cash_minor = Decimal("0")
     card_minor = Decimal("0")
     cash_tip_minor = Decimal("0")
     card_tip_minor = Decimal("0")
+    raw_payment_total_minor = Decimal("0")
     payments = purchase.get("payments", [])
     if not isinstance(payments, list):
         raise AggregationError("Ungültige Zahlungsliste im Zettle-Kauf")
@@ -211,19 +295,42 @@ def _process_purchase(
         if not isinstance(payment, dict):
             raise AggregationError("Ungültige Zahlungsposition im Zettle-Kauf")
         amount = _minor_amount(payment, "amount", "Zahlungsbetrag")
-        if amount < 0:
-            raise AggregationError(
-                "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
-            )
+        raw_payment_total_minor += amount
         gratuity = (
             _minor_amount(payment, "gratuityAmount", "Trinkgeldbetrag")
             if "gratuityAmount" in payment
             else Decimal("0")
         )
-        if gratuity < 0 or gratuity > amount:
-            raise AggregationError("Ungültiger Zettle-Trinkgeldbetrag")
-        if gratuity and config.tip_mode != "byCashier":
-            raise AggregationError("Trinkgeld ist nicht konfiguriert")
+        if is_refund:
+            if amount >= 0:
+                raise AggregationError(
+                    "Zettle-Rückerstattung benötigt negative Zahlungsbeträge"
+                )
+            references = payment.get("references")
+            refunded_payment = (
+                references.get("refundsPayment")
+                if isinstance(references, dict)
+                else None
+            )
+            if not isinstance(refunded_payment, str) or not refunded_payment.strip():
+                raise AggregationError(
+                    "Zettle-Rückerstattungszahlung ohne Ursprungsreferenz"
+                )
+            if gratuity != 0:
+                raise AggregationError(
+                    "Erstattetes Trinkgeld wird noch nicht unterstützt"
+                )
+            amount = -amount
+            gratuity = Decimal("0")
+        else:
+            if amount < 0:
+                raise AggregationError(
+                    "Negative Zahlung ohne Zettle-Rückerstattungskennzeichen"
+                )
+            if gratuity < 0 or gratuity > amount:
+                raise AggregationError("Ungültiger Zettle-Trinkgeldbetrag")
+            if gratuity and config.tip_mode != "byCashier":
+                raise AggregationError("Trinkgeld ist nicht konfiguriert")
         payment_type = payment.get("type")
         if payment_type in CARD_PAYMENT_TYPES:
             card_minor += amount - gratuity
@@ -236,6 +343,24 @@ def _process_purchase(
 
     total_payment_minor = cash_minor + card_minor
     total_tip_minor = cash_tip_minor + card_tip_minor
+    if "amount" in purchase:
+        declared_amount = _minor_amount(purchase, "amount", "Zettle-Kaufsumme")
+        allowed_declared_amounts = {raw_payment_total_minor}
+        if not is_refund:
+            # Zettle documents that payment.amount includes gratuity. Depending
+            # on purchase source, purchase.amount may describe the receipt
+            # either with or without that non-product amount.
+            allowed_declared_amounts.add(raw_payment_total_minor - total_tip_minor)
+        if declared_amount not in allowed_declared_amounts:
+            raise AggregationError(
+                "Zettle-Kaufsumme stimmt nicht mit den Zahlungen überein"
+            )
+        if is_refund and declared_amount >= 0:
+            raise AggregationError("Zettle-Rückerstattung benötigt eine negative Kaufsumme")
+        if not is_refund and declared_amount < 0:
+            raise AggregationError(
+                "Negative Kaufsumme ohne Zettle-Rückerstattungskennzeichen"
+            )
     if total_payment_minor == 0 and total_tip_minor == 0:
         if purchase.get("products"):
             raise AggregationError("Zettle-Kauf enthält Produkte, aber keine Zahlung")
@@ -256,7 +381,11 @@ def _process_purchase(
         except ConfigurationError as exc:
             raise AggregationError(str(exc)) from exc
         _validate_product_tax(product, rule.vat_rate)
-        gross = _product_gross(product, allow_discounts=config.allow_discounts)
+        gross = _product_gross(
+            product,
+            allow_discounts=config.allow_discounts,
+            refund=is_refund,
+        )
         if gross == 0:
             continue
         key = (rule.category, rule.vat_rate)
@@ -275,6 +404,7 @@ def _process_purchase(
         category_totals,
         (cash_minor / 100).quantize(CENT),
         payment_gross,
+        refund=is_refund,
     )
 
     if total_tip_minor:
@@ -301,6 +431,7 @@ def _allocate_balanced(
     category_totals: dict[tuple[str, Decimal], Decimal],
     cash_gross: Decimal,
     total_gross: Decimal,
+    refund: bool = False,
 ) -> None:
     """Allocate any number of category/VAT rows while preserving all totals."""
     rows = list(category_totals.items())
@@ -318,8 +449,9 @@ def _allocate_balanced(
             upper = min(row_gross, cash_remaining)
             cash_row = min(max(ideal, lower), upper)
         card_row = row_gross - cash_row
-        summary.add("cash", category, vat_rate, cash_row)
-        summary.add("card", category, vat_rate, card_row)
+        add = summary.add_refund if refund else summary.add
+        add("cash", category, vat_rate, cash_row)
+        add("card", category, vat_rate, card_row)
         cash_remaining -= cash_row
         row_total_remaining -= row_gross
 
@@ -334,7 +466,9 @@ def _minor_amount(source: dict, key: str, label: str) -> Decimal:
     return amount
 
 
-def _product_gross(product: dict, allow_discounts: bool = False) -> Decimal:
+def _product_gross(
+    product: dict, allow_discounts: bool = False, refund: bool = False
+) -> Decimal:
     try:
         quantity = Decimal(str(product.get("quantity", "1")))
         unit_minor = Decimal(str(product["unitPrice"]))
@@ -342,22 +476,39 @@ def _product_gross(product: dict, allow_discounts: bool = False) -> Decimal:
         raise AggregationError("Ungültiger Produktbetrag im Zettle-Kauf") from exc
     if not quantity.is_finite() or not unit_minor.is_finite():
         raise AggregationError("Produktbetrag muss eine endliche Zahl sein")
-    if quantity < 0 or unit_minor < 0:
-        raise AggregationError(
-            "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
+    if unit_minor < 0:
+        raise AggregationError("Zettle-Produktpreis darf nicht negativ sein")
+    if refund:
+        if quantity >= 0:
+            raise AggregationError(
+                "Zettle-Rückerstattung benötigt negative Produktmengen"
+            )
+        calculated = (-quantity * unit_minor / 100).quantize(
+            CENT, rounding=ROUND_HALF_UP
         )
-    calculated = (quantity * unit_minor / 100).quantize(CENT, rounding=ROUND_HALF_UP)
+    else:
+        if quantity < 0:
+            raise AggregationError(
+                "Negative Produktmenge ohne Zettle-Rückerstattungskennzeichen"
+            )
+        calculated = (quantity * unit_minor / 100).quantize(
+            CENT, rounding=ROUND_HALF_UP
+        )
     if "grossValue" not in product:
         return calculated
 
     reported = _minor_amount(product, "grossValue", "Zettle-Bruttowert")
-    reported_gross = (reported / 100).quantize(CENT)
+    if refund and reported > 0:
+        raise AggregationError(
+            "Zettle-Rückerstattung benötigt einen negativen Bruttowert"
+        )
+    if not refund and reported < 0:
+        raise AggregationError(
+            "Negativer Bruttowert ohne Zettle-Rückerstattungskennzeichen"
+        )
+    reported_gross = (abs(reported) / 100).quantize(CENT)
     if reported_gross != calculated and not allow_discounts:
         raise AggregationError("Zettle-Produkt enthält einen nicht erlaubten Rabatt")
-    if reported_gross < 0:
-        raise AggregationError(
-            "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
-        )
     return reported_gross
 
 
