@@ -2,7 +2,7 @@
 import unittest
 from decimal import Decimal
 
-from accounting_config import AccountingConfig, ProductRule
+from accounting_config import AccountingConfig, ProductRule, TipRule
 from aggregator import (
     AggregationError,
     DailySummary,
@@ -30,15 +30,25 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dic
     return {"currency": "EUR", "products": products, "payments": payments}
 
 
-def _custom_config(*, allow_discounts=False) -> AccountingConfig:
+def _custom_config(*, allow_discounts=False, tips=False) -> AccountingConfig:
     return AccountingConfig(
         currency="EUR",
         product_rules=(
             ProductRule(frozenset({"Haarschnitt"}), "hair", Decimal("19")),
             ProductRule(frozenset({"Snack"}), "food", Decimal("7")),
         ),
-        category_environment={"hair": "HAIR_ID", "food": "FOOD_ID"},
+        category_environment={
+            "hair": "HAIR_ID",
+            "food": "FOOD_ID",
+            "ownerTips": "OWNER_TIPS_ID",
+            "employeeTips": "EMPLOYEE_TIPS_ID",
+        },
         allow_discounts=allow_discounts,
+        tip_mode="byCashier" if tips else "reject",
+        tip_rules=(
+            TipRule("101", "entrepreneur", "ownerTips", Decimal("19")),
+            TipRule("202", "employee", "employeeTips", Decimal("0")),
+        ) if tips else (),
     )
 
 
@@ -202,6 +212,108 @@ class TestAggregate(unittest.TestCase):
         p = _purchase(service_cents=1000, cash_cents=1200)
         with self.assertRaises(AggregationError):
             aggregate([p])
+
+    def test_owner_tip_uses_configured_revenue_and_vat(self):
+        p = {
+            "currency": "EUR",
+            "userId": 101,
+            "products": [{
+                "name": "Haarschnitt", "unitPrice": 1000, "quantity": "1",
+            }],
+            "payments": [{
+                "amount": 1200,
+                "gratuityAmount": 200,
+                "type": "IZETTLE_CARD",
+            }],
+        }
+        summary = aggregate([p], _custom_config(tips=True))
+        self.assertEqual(summary.category_gross("hair"), Decimal("10.00"))
+        self.assertEqual(summary.category_gross("ownerTips"), Decimal("2.00"))
+        self.assertEqual(summary.lines[("ownerTips", Decimal("19"))].card_gross,
+                         Decimal("2.00"))
+
+    def test_employee_tip_uses_zero_vat_category(self):
+        p = {
+            "currency": "EUR",
+            "userId": "202",
+            "products": [{
+                "name": "Haarschnitt", "unitPrice": 1000, "quantity": "1",
+            }],
+            "payments": [{
+                "amount": 1100,
+                "gratuityAmount": 100,
+                "type": "CASH",
+            }],
+        }
+        summary = aggregate([p], _custom_config(tips=True))
+        tip_line = summary.lines[("employeeTips", Decimal("0"))]
+        self.assertEqual(tip_line.cash_gross, Decimal("1.00"))
+        self.assertEqual(tip_line.cash_vat, Decimal("0.00"))
+
+    def test_tips_from_multiple_cashiers_are_split_by_rule(self):
+        owner = {
+            "currency": "EUR", "userId": 101,
+            "products": [{"name": "Haarschnitt", "unitPrice": 1000, "quantity": "1"}],
+            "payments": [{"amount": 1100, "gratuityAmount": 100,
+                          "type": "IZETTLE_CARD"}],
+        }
+        employee = {
+            "currency": "EUR", "userId": 202,
+            "products": [{"name": "Haarschnitt", "unitPrice": 1000, "quantity": "1"}],
+            "payments": [{"amount": 1200, "gratuityAmount": 200,
+                          "type": "IZETTLE_CARD"}],
+        }
+        summary = aggregate([owner, employee], _custom_config(tips=True))
+        self.assertEqual(summary.category_gross("ownerTips"), Decimal("1.00"))
+        self.assertEqual(summary.category_gross("employeeTips"), Decimal("2.00"))
+        self.assertEqual(summary.total_gross, Decimal("23.00"))
+
+    def test_tip_follows_its_payment_method(self):
+        p = {
+            "currency": "EUR", "userId": 202,
+            "products": [{"name": "Haarschnitt", "unitPrice": 1000, "quantity": "1"}],
+            "payments": [
+                {"amount": 650, "gratuityAmount": 50, "type": "CASH"},
+                {"amount": 450, "gratuityAmount": 50, "type": "IZETTLE_CARD"},
+            ],
+        }
+        summary = aggregate([p], _custom_config(tips=True))
+        tip_line = summary.lines[("employeeTips", Decimal("0"))]
+        self.assertEqual(tip_line.cash_gross, Decimal("0.50"))
+        self.assertEqual(tip_line.card_gross, Decimal("0.50"))
+        self.assertEqual(summary.category_gross("hair"), Decimal("10.00"))
+
+    def test_tip_is_rejected_without_configuration(self):
+        p = _purchase(service_cents=1000, card_cents=1100)
+        p["payments"][0]["gratuityAmount"] = 100
+        with self.assertRaises(AggregationError):
+            aggregate([p])
+
+    def test_tip_for_unknown_cashier_is_rejected(self):
+        p = {
+            "currency": "EUR", "userId": 999,
+            "products": [{"name": "Haarschnitt", "unitPrice": 1000, "quantity": "1"}],
+            "payments": [{"amount": 1100, "gratuityAmount": 100,
+                          "type": "IZETTLE_CARD"}],
+        }
+        with self.assertRaises(AggregationError):
+            aggregate([p], _custom_config(tips=True))
+
+    def test_tip_without_cashier_is_rejected(self):
+        p = {
+            "currency": "EUR",
+            "products": [{"name": "Haarschnitt", "unitPrice": 1000, "quantity": "1"}],
+            "payments": [{"amount": 1100, "gratuityAmount": 100,
+                          "type": "IZETTLE_CARD"}],
+        }
+        with self.assertRaises(AggregationError):
+            aggregate([p], _custom_config(tips=True))
+
+    def test_tip_larger_than_payment_is_rejected(self):
+        p = _purchase(service_cents=1000, card_cents=1000)
+        p["payments"][0]["gratuityAmount"] = 1001
+        with self.assertRaises(AggregationError):
+            aggregate([p], _custom_config(tips=True))
 
     def test_products_without_payment_are_rejected(self):
         p = {"products": [{"name": "Verkauf", "unitPrice": 1000, "quantity": "1"}],

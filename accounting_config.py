@@ -21,12 +21,24 @@ class ProductRule:
 
 
 @dataclass(frozen=True)
+class TipRule:
+    """Accounting treatment for tips collected by one Zettle user."""
+
+    user_id: str
+    role: str
+    category: str
+    vat_rate: Decimal
+    display_name: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class AccountingConfig:
     currency: str
     product_rules: tuple[ProductRule, ...]
     category_environment: Mapping[str, str]
     allow_discounts: bool = False
     tip_mode: str = "reject"
+    tip_rules: tuple[TipRule, ...] = ()
     refund_mode: str = "reject"
 
     def rule_for_product(self, name: str) -> ProductRule:
@@ -52,6 +64,15 @@ class AccountingConfig:
                 "Fehlende Kategorie-Umgebungsvariablen: " + ", ".join(sorted(missing))
             )
         return result
+
+    def tip_rule_for_user(self, user_id: object) -> TipRule:
+        normalized = _user_id(user_id)
+        matches = [rule for rule in self.tip_rules if rule.user_id == normalized]
+        if not matches:
+            raise ConfigurationError(
+                f"Keine Trinkgeldregel für Zettle-Benutzer-ID {normalized!r}"
+            )
+        return matches[0]
 
 
 DEFAULT_CONFIG = AccountingConfig(
@@ -137,7 +158,7 @@ def _parse_config(raw: object) -> AccountingConfig:
             )
         if not isinstance(category, str) or category not in category_environment:
             raise ConfigurationError(f"Unbekannte Kategorie in Produktregel {index}")
-        rate = _decimal_rate(item.get("vatRate"), index)
+        rate = _decimal_rate(item.get("vatRate"), f"Produktregel {index}")
         rules.append(ProductRule(clean_names, category, rate))
         seen_names.update(clean_names)
 
@@ -150,10 +171,10 @@ def _parse_config(raw: object) -> AccountingConfig:
             "adjustments.discounts muss reject oder useGrossValue sein"
         )
     allow_discounts = discount_mode == "useGrossValue"
-    tip_mode = adjustments.get("tips", "reject")
+    tip_mode, tip_rules = _parse_tip_rules(
+        adjustments.get("tips", "reject"), category_environment
+    )
     refund_mode = adjustments.get("refunds", "reject")
-    if tip_mode != "reject":
-        raise ConfigurationError("Trinkgeldmodus ist noch nicht fachlich konfiguriert")
     if refund_mode != "reject":
         raise ConfigurationError("Erstattungsmodus ist noch nicht fachlich konfiguriert")
 
@@ -163,15 +184,81 @@ def _parse_config(raw: object) -> AccountingConfig:
         category_environment=category_environment,
         allow_discounts=allow_discounts,
         tip_mode=tip_mode,
+        tip_rules=tip_rules,
         refund_mode=refund_mode,
     )
 
 
-def _decimal_rate(value: object, index: int) -> Decimal:
+def _parse_tip_rules(
+    value: object, category_environment: Mapping[str, str]
+) -> tuple[str, tuple[TipRule, ...]]:
+    if value == "reject":
+        return "reject", ()
+    if not isinstance(value, dict) or value.get("mode") != "byCashier":
+        raise ConfigurationError(
+            "adjustments.tips muss reject oder ein byCashier-Objekt sein"
+        )
+    cashiers = value.get("cashiers")
+    if not isinstance(cashiers, list) or not cashiers:
+        raise ConfigurationError("Trinkgeldmodus byCashier benötigt cashiers")
+
+    rules: list[TipRule] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(cashiers, 1):
+        if not isinstance(item, dict):
+            raise ConfigurationError(f"Trinkgeldregel {index} muss ein Objekt sein")
+        user_id = _user_id(item.get("userId"))
+        if user_id in seen_ids:
+            raise ConfigurationError(f"Doppelte Zettle-Benutzer-ID {user_id!r}")
+        role = item.get("role")
+        if role not in {"entrepreneur", "employee"}:
+            raise ConfigurationError(
+                f"Trinkgeldregel {index}: role muss entrepreneur oder employee sein"
+            )
+        category = item.get("category")
+        if not isinstance(category, str) or category not in category_environment:
+            raise ConfigurationError(
+                f"Trinkgeldregel {index}: unbekannte Kategorie"
+            )
+        vat_rate = _decimal_rate(item.get("vatRate"), f"Trinkgeldregel {index}")
+        if role == "employee" and vat_rate != 0:
+            raise ConfigurationError(
+                f"Trinkgeldregel {index}: Mitarbeiter-Trinkgeld muss vatRate 0 haben"
+            )
+        display_name = item.get("displayName")
+        if display_name is not None and (
+            not isinstance(display_name, str) or not display_name.strip()
+        ):
+            raise ConfigurationError(
+                f"Trinkgeldregel {index}: displayName muss eine nichtleere Zeichenfolge sein"
+            )
+        rules.append(
+            TipRule(
+                user_id=user_id,
+                role=role,
+                category=category,
+                vat_rate=vat_rate,
+                display_name=display_name.strip() if display_name else None,
+            )
+        )
+        seen_ids.add(user_id)
+    return "byCashier", tuple(rules)
+
+
+def _user_id(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ConfigurationError("Zettle-Benutzer-ID muss Text oder Ganzzahl sein")
+    normalized = str(value).strip()
+    if not normalized:
+        raise ConfigurationError("Zettle-Benutzer-ID darf nicht leer sein")
+    return normalized
+
+
+def _decimal_rate(value: object, index: object) -> Decimal:
     try:
         rate = Decimal(str(value))
     except (ValueError, TypeError, DecimalException) as exc:
-        raise ConfigurationError(f"Ungültiger vatRate in Produktregel {index}") from exc
+        raise ConfigurationError(f"Ungültiger vatRate in {index}") from exc
     if not rate.is_finite() or rate < 0 or rate > 100:
-        raise ConfigurationError(f"vatRate außerhalb 0 bis 100 in Produktregel {index}")
+        raise ConfigurationError(f"vatRate außerhalb 0 bis 100 in {index}")
     return rate

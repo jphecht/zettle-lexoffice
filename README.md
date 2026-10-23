@@ -8,15 +8,16 @@ verbunden.
 - Ruft alle Kassenvorgänge eines Tages über die Zettle Purchase API ab
 - Trennt Kartenzahlungen und Barzahlungen
 - Rechnet konfigurierte Umsatzsteuersätze aus Bruttobeträgen heraus
+- Kann explizit von Zettle gemeldetes Trinkgeld nach Kassenbenutzer und Rolle aufteilen
 - Legt je einen Bar- und Karten-Sammelbeleg (`salesinvoice`) in Lexware Office an
 - Schützt vor Doppel-Import und überspringt umsatzlose Tage
 - Bricht bei unbekannten oder nicht abgestimmten Daten ab, statt sie zu schätzen
 
 > **Wichtige Einschränkung:** Ohne eigene Konfiguration bleibt das bisherige
 > Verhalten mit `Dienstleistung`, `Damen WaSchFö`, `Verkauf` und 19 % erhalten.
-> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze und Rabatte
-> konfigurieren. Trinkgeld, Gutscheine, Gebühren, Stornos und Rückerstattungen
-> bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
+> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze, Rabatte und
+> Trinkgeldregeln konfigurieren. Gutscheine, Gebühren, Stornos und
+> Rückerstattungen bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
 > Abweichung, legt es keinen Beleg an.
 
 ---
@@ -140,6 +141,35 @@ tatsächliche Bruttowert verwendet. Nicht zugeordnete Produktnamen oder
 abweichende Steuersätze führen weiterhin sicher zum Abbruch des betreffenden
 Tages.
 
+#### Trinkgeld nach Kassenbenutzer
+
+Zettle liefert pro Kauf eine stabile `userId` und je Zahlung den expliziten
+`gratuityAmount`. Im Modus `byCashier` wird ausschließlich dieser gemeldete
+Trinkgeldbetrag verwendet; eine bloße Differenz zwischen Produkt- und
+Zahlungssumme wird niemals als Trinkgeld geraten.
+
+Jeder Kassenbenutzer wird in `adjustments.tips.cashiers` einer Rolle zugeordnet:
+
+- `entrepreneur`: Trinkgeld wird mit der konfigurierten Erlöskategorie und dem
+  ausdrücklich festgelegten Umsatzsteuersatz gebucht.
+- `employee`: Trinkgeld wird mit 0 % Umsatzsteuer und einer eigenen Kategorie
+  gebucht. Mehrere Mitarbeiter können getrennte Kategorien verwenden oder eine
+  gemeinsame Kategorie teilen.
+
+Die Beispieldatei enthält nur fiktive Benutzer-IDs. Sie müssen durch die
+`userId` aus den eigenen Zettle-Käufen ersetzt werden. Namen dienen lediglich
+der Lesbarkeit; die Zuordnung erfolgt ausschließlich über die ID. Bei fehlender
+oder unbekannter ID bricht der Tag vor dem Schreiben nach Lexware ab.
+
+> **Buchhaltungshinweis:** Der Lexware-Voucher-Endpunkt akzeptiert in einem
+> Verkaufsbeleg nur unterstützte Kategorien vom Typ `income`. Für
+> Mitarbeiter-Trinkgeld muss deshalb eine in der eigenen Lexware-Organisation
+> verfügbare Kategorie gewählt werden, die fachlich zur Abbildung des
+> durchlaufenden Postens passt. Ist keine solche Kategorie verfügbar oder die
+> Behandlung ungeklärt, `"tips": "reject"` beibehalten. Die Steuerfreiheit von
+> Arbeitnehmer-Trinkgeld setzt insbesondere die Voraussetzungen des
+> [§ 3 Nr. 51 EStG](https://www.gesetze-im-internet.de/estg/__3.html) voraus.
+
 ---
 
 ### Fertige `.env`
@@ -149,6 +179,9 @@ ZETTLE_API_KEY=...
 LEXOFFICE_API_KEY=...
 LEXOFFICE_SERVICE_CATEGORY_ID=...
 LEXOFFICE_SALES_CATEGORY_ID=...
+# Nur bei aktivierter Trinkgeldzuordnung:
+LEXOFFICE_OWNER_TIPS_CATEGORY_ID=...
+LEXOFFICE_EMPLOYEE_TIPS_CATEGORY_ID=...
 LEXOFFICE_CONTACT_ID=...
 # Nur bei eigener Datei erforderlich:
 ACCOUNTING_CONFIG=accounting.json
