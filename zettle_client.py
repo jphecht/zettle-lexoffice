@@ -24,7 +24,7 @@ CARD_PAYMENT_TYPES = {
     "VIPPS",
     "SWISH",
 }
-CASH_PAYMENT_TYPES = {"CASH"}
+CASH_PAYMENT_TYPES = {"CASH", "IZETTLE_CASH"}
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 

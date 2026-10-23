@@ -123,6 +123,13 @@ class TestAggregate(unittest.TestCase):
         self.assertTrue(s.has_cash)
         self.assertFalse(s.has_card)
 
+    def test_real_zettle_cash_payment_type(self):
+        purchase = _purchase(service_cents=11900, cash_cents=11900)
+        purchase["payments"][0]["type"] = "IZETTLE_CASH"
+        summary = aggregate([purchase])
+        self.assertEqual(summary.cash_service_gross, Decimal("119.00"))
+        self.assertFalse(summary.has_card)
+
     def test_pure_card_sales(self):
         s = aggregate([_purchase(sales_cents=5950, card_cents=5950)])
         self.assertEqual(s.card_sales_gross, Decimal("59.50"))
