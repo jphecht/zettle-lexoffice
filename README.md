@@ -51,13 +51,12 @@ cp .env.example .env
    - Name: z. B. `Lexoffice Import`
    - App type: **API credentials** (kein Redirect-URI nötig)
 
-3. **Zugangsdaten kopieren:**
-   Nach dem Anlegen erscheinen **Client ID** und **Client Secret** einmalig — sofort sichern.
+3. **API-Key erzeugen und kopieren:**
+   Den von Zettle bereitgestellten JWT-API-Key (`eyJ...`) sofort sicher speichern.
 
 4. **In `.env` eintragen:**
    ```
-   ZETTLE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-   ZETTLE_CLIENT_SECRET=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   ZETTLE_API_KEY=eyJ...
    ```
 
 > **Hinweis:** Der Account, mit dem die Developer App erstellt wird, muss derselbe sein wie der Zettle-Kassenaccount. Das Script liest ausschließlich Kaufhistorie — keine Schreibrechte auf die Kasse.
@@ -77,12 +76,12 @@ cp .env.example .env
 
 ---
 
-### Schritt 3 — Erlöskategorie-ID herausfinden
+### Schritt 3 — Kategorie- und Kontakt-IDs eintragen
 
-Lexoffice ordnet jeden Buchungsposten einer Kategorie (= Buchungskonto) zu.
-Für 19 % Umsatzsteuer ist das typischerweise **„Erlöse 19 % USt"**.
+Lexoffice ordnet Dienstleistung und Warenverkauf jeweils einer Kategorie
+(= Buchungskonto) zu. Außerdem benötigt jeder Sammelbeleg einen Kontakt.
 
-Die UUID dieser Kategorie ermitteln:
+Die UUIDs der Kategorien ermitteln:
 
 ```bash
 python3 - <<'EOF'
@@ -91,7 +90,7 @@ from dotenv import load_dotenv
 from lexoffice_client import LexofficeClient
 
 load_dotenv()
-client = LexofficeClient(os.environ["LEXOFFICE_API_KEY"], "")
+client = LexofficeClient(os.environ["LEXOFFICE_API_KEY"], "", "", "")
 cats = client.list_posting_categories()
 for c in cats:
     if "19" in c.get("name", "") or "Erlös" in c.get("name", ""):
@@ -99,9 +98,11 @@ for c in cats:
 EOF
 ```
 
-Die ausgegebene UUID in `.env` eintragen:
+Die passenden Kategorie-UUIDs und die Kontakt-UUID in `.env` eintragen:
 ```
-LEXOFFICE_REVENUE_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+LEXOFFICE_SERVICE_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+LEXOFFICE_SALES_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+LEXOFFICE_CONTACT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 ---
@@ -109,10 +110,11 @@ LEXOFFICE_REVENUE_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ### Fertige `.env`
 
 ```
-ZETTLE_CLIENT_ID=...
-ZETTLE_CLIENT_SECRET=...
+ZETTLE_API_KEY=...
 LEXOFFICE_API_KEY=...
-LEXOFFICE_REVENUE_CATEGORY_ID=...
+LEXOFFICE_SERVICE_CATEGORY_ID=...
+LEXOFFICE_SALES_CATEGORY_ID=...
+LEXOFFICE_CONTACT_ID=...
 ```
 
 ---
@@ -221,4 +223,4 @@ zettle-lexoffice/
 python -m unittest discover -v
 ```
 
-65 Tests, keine externen Abhängigkeiten zur Laufzeit (alle HTTP-Calls gemockt).
+70 Tests, keine externen API-Aufrufe (alle HTTP-Calls gemockt).
