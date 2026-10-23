@@ -282,6 +282,29 @@ darf der Status manuell auf `confirmed` gesetzt und die Datei als
 `accounting.json` übernommen werden. Das Programm überschreibt niemals eine
 bestehende Konfiguration.
 
+#### Monats-/Zeitraumprüfung vor der Übertragung
+
+Vor einem Monatsimport kann der gesamte Zeitraum ausschließlich lesend aus
+Zettle geprüft werden:
+
+```bash
+python main.py --from 2026-09-01 --to 2026-09-30 --preflight
+```
+
+Dieser Befehl greift nicht auf Lexware Office zu und legt keine Belege an. Er
+zeigt leere, vollständig geprüfte und fehlerhafte Tage sowie Einnahmen,
+Erstattungen und Steuerkorrekturen getrennt nach Steuersatz und
+Buchungskategorie. Trinkgelder werden zusätzlich nach Unternehmer- und
+Mitarbeiterrolle ausgewiesen.
+
+Nicht konfigurierte Produkte, ungeklärte 0-%-Artikel, Steuersätze außerhalb
+0/7/19, Gutscheinvorgänge und fehlerhafte Tage blockieren die Freigabe. Ein
+fehlerhafter Tag wird vollständig aus den Summen ausgeschlossen; der Bericht
+bezeichnet die Summen deshalb ausdrücklich als Summen der vollständig geprüften
+Tage. Bei einem Blocker endet die Prüfung mit Exit-Code 1. Eine technisch
+erfolgreiche Prüfung ersetzt nicht die fachliche Kontrolle der
+Buchungskonfiguration.
+
 ---
 
 ### Fertige `.env`
@@ -318,6 +341,9 @@ python main.py --from 2025-01-01 --to 2025-05-31
 
 # Trockenlauf — liest Zettle, schreibt aber nicht in Lexware Office
 python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
+
+# Monatsprüfung — liest nur Zettle und greift nicht auf Lexware Office zu
+python main.py --from 2026-09-01 --to 2026-09-30 --preflight
 
 # Gutschein-Konfiguration lokal prüfen — keine API-Aufrufe
 python main.py --review-gift-cards
@@ -401,6 +427,7 @@ zettle-lexoffice/
 ├── aggregator.py         # Aggregation nach Zahlungsart, Kategorie und Steuer
 ├── catalog_review.py     # lesende Produkt- und Steuersatzprüfung
 ├── config_proposal.py    # sicherer, unbestätigter Konfigurationsentwurf
+├── preflight_report.py   # lesender Monatsbericht vor der Übertragung
 ├── requirements.txt
 ├── requirements.lock     # reproduzierbar geprüfte Paketversionen
 ├── SECURITY.md
