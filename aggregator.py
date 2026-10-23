@@ -202,6 +202,8 @@ def _process_purchase(
 
     cash_minor = Decimal("0")
     card_minor = Decimal("0")
+    cash_tip_minor = Decimal("0")
+    card_tip_minor = Decimal("0")
     payments = purchase.get("payments", [])
     if not isinstance(payments, list):
         raise AggregationError("Ungültige Zahlungsliste im Zettle-Kauf")
@@ -213,16 +215,28 @@ def _process_purchase(
             raise AggregationError(
                 "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
             )
+        gratuity = (
+            _minor_amount(payment, "gratuityAmount", "Trinkgeldbetrag")
+            if "gratuityAmount" in payment
+            else Decimal("0")
+        )
+        if gratuity < 0 or gratuity > amount:
+            raise AggregationError("Ungültiger Zettle-Trinkgeldbetrag")
+        if gratuity and config.tip_mode != "byCashier":
+            raise AggregationError("Trinkgeld ist nicht konfiguriert")
         payment_type = payment.get("type")
         if payment_type in CARD_PAYMENT_TYPES:
-            card_minor += amount
+            card_minor += amount - gratuity
+            card_tip_minor += gratuity
         elif payment_type in CASH_PAYMENT_TYPES:
-            cash_minor += amount
+            cash_minor += amount - gratuity
+            cash_tip_minor += gratuity
         else:
             raise AggregationError(f"Unbekannter Zettle-Zahlungstyp: {payment_type!r}")
 
     total_payment_minor = cash_minor + card_minor
-    if total_payment_minor == 0:
+    total_tip_minor = cash_tip_minor + card_tip_minor
+    if total_payment_minor == 0 and total_tip_minor == 0:
         if purchase.get("products"):
             raise AggregationError("Zettle-Kauf enthält Produkte, aber keine Zahlung")
         return
@@ -262,6 +276,24 @@ def _process_purchase(
         (cash_minor / 100).quantize(CENT),
         payment_gross,
     )
+
+    if total_tip_minor:
+        try:
+            tip_rule = config.tip_rule_for_user(purchase.get("userId"))
+        except ConfigurationError as exc:
+            raise AggregationError(str(exc)) from exc
+        summary.add(
+            "cash",
+            tip_rule.category,
+            tip_rule.vat_rate,
+            (cash_tip_minor / 100).quantize(CENT),
+        )
+        summary.add(
+            "card",
+            tip_rule.category,
+            tip_rule.vat_rate,
+            (card_tip_minor / 100).quantize(CENT),
+        )
 
 
 def _allocate_balanced(

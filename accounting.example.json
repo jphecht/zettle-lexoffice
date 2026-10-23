@@ -6,6 +6,12 @@
     },
     "sales": {
       "environmentVariable": "LEXOFFICE_SALES_CATEGORY_ID"
+    },
+    "ownerTips": {
+      "environmentVariable": "LEXOFFICE_OWNER_TIPS_CATEGORY_ID"
+    },
+    "employeeTips": {
+      "environmentVariable": "LEXOFFICE_EMPLOYEE_TIPS_CATEGORY_ID"
     }
   },
   "products": [
@@ -22,7 +28,25 @@
   ],
   "adjustments": {
     "discounts": "useGrossValue",
-    "tips": "reject",
+    "tips": {
+      "mode": "byCashier",
+      "cashiers": [
+        {
+          "userId": 1001,
+          "displayName": "Beispiel Unternehmer",
+          "role": "entrepreneur",
+          "category": "ownerTips",
+          "vatRate": "19"
+        },
+        {
+          "userId": 1002,
+          "displayName": "Beispiel Mitarbeiter",
+          "role": "employee",
+          "category": "employeeTips",
+          "vatRate": "0"
+        }
+      ]
+    },
     "refunds": "reject"
   }
 }
