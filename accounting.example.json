@@ -1,0 +1,57 @@
+{
+  "currency": "EUR",
+  "categories": {
+    "service": {
+      "environmentVariable": "LEXOFFICE_SERVICE_CATEGORY_ID"
+    },
+    "sales": {
+      "environmentVariable": "LEXOFFICE_SALES_CATEGORY_ID"
+    },
+    "ownerTips": {
+      "environmentVariable": "LEXOFFICE_OWNER_TIPS_CATEGORY_ID"
+    },
+    "employeeTips": {
+      "environmentVariable": "LEXOFFICE_EMPLOYEE_TIPS_CATEGORY_ID"
+    }
+  },
+  "products": [
+    {
+      "names": ["Dienstleistung", "Beispiel Zusatzleistung"],
+      "category": "service",
+      "vatRate": "19"
+    },
+    {
+      "names": ["Verkauf"],
+      "category": "sales",
+      "vatRate": "19"
+    }
+  ],
+  "adjustments": {
+    "discounts": "useGrossValue",
+    "tips": {
+      "mode": "byCashier",
+      "cashiers": [
+        {
+          "userId": 1001,
+          "displayName": "Beispiel Unternehmer",
+          "role": "entrepreneur",
+          "category": "ownerTips",
+          "vatRate": "19"
+        },
+        {
+          "userId": 1002,
+          "displayName": "Beispiel Mitarbeiter",
+          "role": "employee",
+          "category": "employeeTips",
+          "vatRate": "0"
+        }
+      ]
+    },
+    "refunds": "separateCreditNote",
+    "giftCards": {
+      "mode": "reviewRequired",
+      "industryProfile": "hairAndBeauty",
+      "redeemableCategories": ["service", "sales"]
+    }
+  }
+}

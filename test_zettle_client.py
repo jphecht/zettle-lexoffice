@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 from zettle_client import (
     CARD_PAYMENT_TYPES,
+    CASH_PAYMENT_TYPES,
+    ZETTLE_PRODUCT_API,
     ZettleAPIError,
     ZettleAuthError,
     ZettleClient,
@@ -153,8 +155,28 @@ class TestGetPurchasesForDay(unittest.TestCase):
         mock_get.return_value = _purchases_resp([])
         self.client.get_purchases_for_day(self.test_date)
         params = mock_get.call_args[1]["params"]
-        self.assertEqual(params["startDate"], "2025-01-15T00:00:00.000+0000")
-        self.assertEqual(params["stopDate"],  "2025-01-16T00:00:00.000+0000")
+        self.assertEqual(params["startDate"], "2025-01-14T23:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-01-15T23:00:00.000+0000")
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_summer_date_uses_berlin_dst(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        mock_get.return_value = _purchases_resp([])
+        self.client.get_purchases_for_day(date(2025, 7, 15))
+        params = mock_get.call_args[1]["params"]
+        self.assertEqual(params["startDate"], "2025-07-14T22:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-07-15T22:00:00.000+0000")
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_dst_start_day_has_23_hours(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        mock_get.return_value = _purchases_resp([])
+        self.client.get_purchases_for_day(date(2025, 3, 30))
+        params = mock_get.call_args[1]["params"]
+        self.assertEqual(params["startDate"], "2025-03-29T23:00:00.000+0000")
+        self.assertEqual(params["stopDate"],  "2025-03-30T22:00:00.000+0000")
 
     @patch("zettle_client.requests.post")
     @patch("zettle_client.requests.get")
@@ -181,6 +203,49 @@ class TestGetPurchasesForDay(unittest.TestCase):
     @patch("zettle_client.time.sleep")
     @patch("zettle_client.requests.post")
     @patch("zettle_client.requests.get")
+    def test_pagination_without_hash_is_rejected(self, mock_get, mock_post, _sleep):
+        mock_post.return_value = _token_post_mock()
+        page = [_make_purchase(f"p-{i}", 1000, "CASH") for i in range(1000)]
+        mock_get.return_value = _purchases_resp(page, has_more=True)
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.time.sleep")
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_repeated_pagination_hash_is_rejected(self, mock_get, mock_post, _sleep):
+        mock_post.return_value = _token_post_mock()
+        page = [_make_purchase(f"p-{i}", 1000, "CASH") for i in range(1000)]
+        mock_get.side_effect = [
+            _purchases_resp(page, last_hash="same", has_more=True),
+            _purchases_resp(page, last_hash="same", has_more=True),
+        ]
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_missing_timestamp_is_rejected(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        purchase = _make_purchase("no-time", 1000, "CASH")
+        del purchase["timestamp"]
+        mock_get.return_value = _purchases_resp([purchase])
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
+    def test_timestamp_without_timezone_is_rejected(self, mock_get, mock_post):
+        mock_post.return_value = _token_post_mock()
+        purchase = _make_purchase("naive-time", 1000, "CASH")
+        purchase["timestamp"] = "2025-01-15T10:00:00"
+        mock_get.return_value = _purchases_resp([purchase])
+        with self.assertRaises(ZettleAPIError):
+            self.client.get_purchases_for_day(self.test_date)
+
+    @patch("zettle_client.time.sleep")
+    @patch("zettle_client.requests.post")
+    @patch("zettle_client.requests.get")
     def test_retry_on_500_raises_after_max_attempts(self, mock_get, mock_post, _sleep):
         mock_post.return_value = _token_post_mock()
         mock_get.return_value = _error_resp(500)
@@ -198,6 +263,28 @@ class TestGetPurchasesForDay(unittest.TestCase):
         self.assertEqual(len(self.client.get_purchases_for_day(self.test_date)), 1)
 
 
+class TestGetProducts(unittest.TestCase):
+    @patch("zettle_client.ZettleClient._get")
+    def test_reads_product_library_from_list_response(self, mock_get):
+        mock_get.return_value = [{"name": "Haarschnitt", "variants": []}]
+        client = _make_client()
+        self.assertEqual(len(client.get_products()), 1)
+        mock_get.assert_called_once_with(ZETTLE_PRODUCT_API, {})
+
+    @patch("zettle_client.ZettleClient._get")
+    def test_reads_wrapped_product_response(self, mock_get):
+        mock_get.return_value = {
+            "products": [{"name": "Haarschnitt", "variants": []}]
+        }
+        self.assertEqual(len(_make_client().get_products()), 1)
+
+    @patch("zettle_client.ZettleClient._get")
+    def test_rejects_invalid_product_response(self, mock_get):
+        mock_get.return_value = {"products": "invalid"}
+        with self.assertRaises(ZettleAPIError):
+            _make_client().get_products()
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 class TestHelpers(unittest.TestCase):
@@ -210,6 +297,11 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("IZETTLE_CARD", CARD_PAYMENT_TYPES)
         self.assertIn("PAYPAL", CARD_PAYMENT_TYPES)
         self.assertNotIn("CASH", CARD_PAYMENT_TYPES)
+
+    def test_cash_payment_types(self):
+        self.assertIn("CASH", CASH_PAYMENT_TYPES)
+        self.assertIn("IZETTLE_CASH", CASH_PAYMENT_TYPES)
+        self.assertNotIn("IZETTLE_CARD", CASH_PAYMENT_TYPES)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,13 @@ Verwendung:
   python main.py --date 2025-01-15                  # bestimmter Tag
   python main.py --from 2025-01-01 --to 2025-05-31  # Bulk-Import
   python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
+  python main.py --review-gift-cards                 # nur lokale Vorprüfung
+  python main.py --review-catalog                    # Zettle nur lesend
+  python main.py --propose-config                    # JSON-Entwurf auf stdout
+  python main.py --from 2026-09-01 --to 2026-09-30 --preflight
 """
 import argparse
+import json
 import logging
 import os
 import sys
@@ -18,8 +23,17 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from aggregator import DailySummary, aggregate
+from accounting_config import (
+    AccountingConfig,
+    ConfigurationError,
+    DEFAULT_CONFIG,
+    load_accounting_config,
+)
+from aggregator import AggregationError, DailySummary, aggregate
+from catalog_review import format_catalog_review, review_product_catalog
+from config_proposal import build_config_proposal
 from lexoffice_client import LexofficeAPIError, LexofficeClient
+from preflight_report import build_preflight_report, format_preflight_report
 from zettle_client import ZettleAPIError, ZettleClient
 
 LOG_DIR = Path(__file__).parent / "logs"
@@ -71,6 +85,18 @@ def _parse_args() -> argparse.Namespace:
         "--from", dest="from_date", metavar="YYYY-MM-DD",
         help="Startdatum für Bulk-Import",
     )
+    group.add_argument(
+        "--review-gift-cards", action="store_true",
+        help="Gutschein-Konfiguration lokal prüfen (keine API-Aufrufe)",
+    )
+    group.add_argument(
+        "--review-catalog", action="store_true",
+        help="Zettle-Produktkatalog nur lesend gegen die Konfiguration prüfen",
+    )
+    group.add_argument(
+        "--propose-config", action="store_true",
+        help="Unbestätigten JSON-Konfigurationsvorschlag auf stdout ausgeben",
+    )
     p.add_argument(
         "--to", dest="to_date", metavar="YYYY-MM-DD",
         help="Enddatum für Bulk-Import (erforderlich mit --from)",
@@ -79,12 +105,24 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run", action="store_true",
         help="Kein Schreibzugriff auf Lexoffice — Payload wird nur geloggt",
     )
+    p.add_argument(
+        "--preflight", action="store_true",
+        help="Zeitraum nur aus Zettle prüfen; kein Lexware-Zugriff",
+    )
     args = p.parse_args()
 
     if args.from_date and not args.to_date:
         p.error("--from erfordert auch --to")
     if args.to_date and not args.from_date:
         p.error("--to erfordert auch --from")
+    if (
+        args.review_gift_cards
+        or args.review_catalog
+        or args.propose_config
+    ) and (args.dry_run or args.preflight):
+        p.error("Katalog-/Konfigurationsprüfungen sind nicht kombinierbar")
+    if args.preflight and args.dry_run:
+        p.error("--preflight kann nicht mit --dry-run kombiniert werden")
 
     return args
 
@@ -113,14 +151,32 @@ def _build_date_range(args: argparse.Namespace) -> list[date]:
     return [date.today() - timedelta(days=1)]
 
 
+def _gift_card_review_detail(config: AccountingConfig) -> str:
+    policy = config.gift_cards
+    if policy.mode == "reject":
+        return "Gutscheine: gesperrt; keine fachliche Vorprüfung konfiguriert"
+
+    rates = ", ".join(f"{rate}%" for rate in policy.vat_rates)
+    categories = ", ".join(sorted(policy.redeemable_categories))
+    if policy.recommendation == "singlePurposeCandidate":
+        recommendation = "Einzweckgutschein-Kandidat"
+    else:
+        recommendation = "Mehrzweckgutschein-Kandidat"
+    return (
+        f"Branche: {policy.industry_profile}; "
+        f"einlösbare Kategorien: {categories}; "
+        f"Steuersätze: {rates}; Vorprüfung: {recommendation}. "
+        "Keine Buchungsfreigabe — Leistungsort und Gutscheinbedingungen "
+        "müssen noch bestätigt werden."
+    )
+
+
 # ── Credentials ───────────────────────────────────────────────────────────────
 
-def _load_clients() -> tuple[ZettleClient, LexofficeClient]:
+def _load_clients() -> tuple[ZettleClient, LexofficeClient, AccountingConfig]:
     required = {
         "ZETTLE_API_KEY":                 os.environ.get("ZETTLE_API_KEY", ""),
         "LEXOFFICE_API_KEY":              os.environ.get("LEXOFFICE_API_KEY", ""),
-        "LEXOFFICE_SERVICE_CATEGORY_ID":  os.environ.get("LEXOFFICE_SERVICE_CATEGORY_ID", ""),
-        "LEXOFFICE_SALES_CATEGORY_ID":    os.environ.get("LEXOFFICE_SALES_CATEGORY_ID", ""),
         "LEXOFFICE_CONTACT_ID":           os.environ.get("LEXOFFICE_CONTACT_ID", ""),
     }
     missing = [k for k, v in required.items() if not v]
@@ -130,14 +186,19 @@ def _load_clients() -> tuple[ZettleClient, LexofficeClient]:
             + "\n".join(f"  {k}" for k in missing)
         )
 
-    zettle    = ZettleClient(required["ZETTLE_API_KEY"])
+    try:
+        config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        category_ids = config.category_ids()
+    except ConfigurationError as exc:
+        sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+
+    zettle = ZettleClient(required["ZETTLE_API_KEY"])
     lexoffice = LexofficeClient(
         required["LEXOFFICE_API_KEY"],
-        required["LEXOFFICE_SERVICE_CATEGORY_ID"],
-        required["LEXOFFICE_SALES_CATEGORY_ID"],
+        category_ids,
         required["LEXOFFICE_CONTACT_ID"],
     )
-    return zettle, lexoffice
+    return zettle, lexoffice, config
 
 
 # ── Single-day processing ─────────────────────────────────────────────────────
@@ -147,6 +208,7 @@ def _process_day(
     zettle: ZettleClient,
     lexoffice: LexofficeClient,
     dry_run: bool,
+    config: AccountingConfig = DEFAULT_CONFIG,
 ) -> tuple[str, str]:
     """Process one day. Returns (status, human-readable detail)."""
     try:
@@ -155,7 +217,7 @@ def _process_day(
         if not purchases:
             return STATUS_SKIPPED, "kein Umsatz"
 
-        summary: DailySummary = aggregate(purchases)
+        summary: DailySummary = aggregate(purchases, config)
 
         if summary.is_empty():
             return STATUS_SKIPPED, "kein Umsatz"
@@ -167,19 +229,33 @@ def _process_day(
         if not dry_run and len(created) == 0:
             return STATUS_SKIPPED, "Belege bereits vorhanden"
 
-        detail = (
-            f"Brutto {summary.total_gross:.2f} €"
-            f"  Bar {summary.cash_gross:.2f} €"
-            f"  Karte {summary.card_gross:.2f} €"
-            f"  (Dienstl. {summary.service_gross:.2f} €"
-            f", Verkauf {summary.sales_gross:.2f} €)"
+        category_detail = ", ".join(
+            f"{category} {gross:.2f} €"
+            for category, gross in summary.category_totals().items()
         )
+        refund_detail = ", ".join(
+            f"{category} {gross:.2f} €"
+            for category, gross in summary.refund_category_totals().items()
+        )
+        detail = (
+            f"Umsatz {summary.total_gross:.2f} €"
+            f"  Erstattungen {summary.refund_total_gross:.2f} €"
+            f"  Netto {summary.net_gross:.2f} €"
+            f"  Bar {summary.cash_gross - summary.refund_cash_gross:.2f} €"
+            f"  Karte {summary.card_gross - summary.refund_card_gross:.2f} €"
+        )
+        if category_detail:
+            detail += f"  Umsatz-Kategorien ({category_detail})"
+        if refund_detail:
+            detail += f"  Erstattungs-Kategorien ({refund_detail})"
         if dry_run:
             return STATUS_OK, "[DRY-RUN] " + detail
         return STATUS_OK, detail + f"  ids={created}"
 
     except ZettleAPIError as exc:
         return STATUS_FAILED, f"Zettle-Fehler: {exc}"
+    except AggregationError as exc:
+        return STATUS_FAILED, f"Buchungsprüfung fehlgeschlagen: {exc}"
     except LexofficeAPIError as exc:
         return STATUS_FAILED, f"Lexoffice-Fehler: {exc}"
     except Exception as exc:
@@ -190,15 +266,75 @@ def _process_day(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    _setup_logging()
     load_dotenv()
 
     args  = _parse_args()
+    if args.review_gift_cards:
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        print(_gift_card_review_detail(config))
+        return
+
+    if args.review_catalog:
+        api_key = os.environ.get("ZETTLE_API_KEY", "")
+        if not api_key:
+            sys.exit("Fehlende Umgebungsvariable in .env: ZETTLE_API_KEY")
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+            products = ZettleClient(api_key).get_products()
+            review = review_product_catalog(products, config)
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        except ZettleAPIError as exc:
+            sys.exit(f"Zettle-Fehler: {exc}")
+        print(format_catalog_review(review, config))
+        if review.blockers:
+            sys.exit(1)
+        return
+
+    if args.propose_config:
+        api_key = os.environ.get("ZETTLE_API_KEY", "")
+        if not api_key:
+            sys.exit("Fehlende Umgebungsvariable in .env: ZETTLE_API_KEY")
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+            products = ZettleClient(api_key).get_products()
+            proposal, _review = build_config_proposal(products, config)
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        except ZettleAPIError as exc:
+            sys.exit(f"Zettle-Fehler: {exc}")
+        print(json.dumps(proposal, ensure_ascii=False, indent=2))
+        return
+
+    if args.preflight:
+        api_key = os.environ.get("ZETTLE_API_KEY", "")
+        if not api_key:
+            sys.exit("Fehlende Umgebungsvariable in .env: ZETTLE_API_KEY")
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        days = _build_date_range(args)
+        report = build_preflight_report(
+            days,
+            ZettleClient(api_key),
+            config,
+            pause_seconds=1,
+        )
+        print(format_preflight_report(report))
+        if report.blockers:
+            sys.exit(1)
+        return
+
+    _setup_logging()
     days  = _build_date_range(args)
     total = len(days)
     width = len(str(total))
 
-    zettle, lexoffice = _load_clients()
+    zettle, lexoffice, config = _load_clients()
 
     if args.dry_run:
         logger.info("=== DRY-RUN — keine Änderungen in Lexoffice ===")
@@ -207,7 +343,9 @@ def main() -> None:
 
     for i, day in enumerate(days, 1):
         prefix = f"[{i:{width}d}/{total}] {day}"
-        status, detail = _process_day(day, zettle, lexoffice, dry_run=args.dry_run)
+        status, detail = _process_day(
+            day, zettle, lexoffice, dry_run=args.dry_run, config=config
+        )
         counts[status] += 1
 
         if status == STATUS_OK:

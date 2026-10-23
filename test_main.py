@@ -1,10 +1,22 @@
 """Integration-style tests for main.py."""
+import argparse
+import io
 import unittest
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from main import STATUS_FAILED, STATUS_OK, STATUS_SKIPPED, _build_date_range, _process_day
+import main as main_module
+from accounting_config import AccountingConfig, DEFAULT_CONFIG, GiftCardPolicy
+from main import (
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    _build_date_range,
+    _gift_card_review_detail,
+    _process_day,
+)
 
 TODAY = date(2025, 6, 1)
 
@@ -22,7 +34,7 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=None, card_cents=0) -> 
         payments.append({"amount": cash_cents, "type": "CASH"})
     if card_cents:
         payments.append({"amount": card_cents, "type": "IZETTLE_CARD"})
-    return {"products": products, "payments": payments}
+    return {"currency": "EUR", "products": products, "payments": payments}
 
 
 def _mock_zettle(purchases):
@@ -33,6 +45,26 @@ def _mock_lexoffice(created=None):
     m = MagicMock()
     m.create_daily_vouchers.return_value = created if created is not None else ["new-id"]
     return m
+
+
+def _refund_purchase(amount_cents=1000) -> dict:
+    return {
+        "currency": "EUR",
+        "amount": -amount_cents,
+        "refund": True,
+        "refundsPurchaseUUID1": "original-purchase",
+        "products": [{
+            "name": "Dienstleistung",
+            "unitPrice": amount_cents,
+            "quantity": "-1",
+            "grossValue": -amount_cents,
+        }],
+        "payments": [{
+            "amount": -amount_cents,
+            "type": "IZETTLE_CARD",
+            "references": {"refundsPayment": "original-payment"},
+        }],
+    }
 
 
 # ── _build_date_range ─────────────────────────────────────────────────────────
@@ -64,7 +96,128 @@ class TestBuildDateRange(unittest.TestCase):
         self.assertEqual(_build_date_range(args), [TODAY - timedelta(days=1)])
 
 
+class TestGiftCardReview(unittest.TestCase):
+    def test_rejected_gift_cards_are_reported(self):
+        self.assertIn("gesperrt", _gift_card_review_detail(DEFAULT_CONFIG))
+
+    def test_review_reports_industry_rates_and_candidate(self):
+        policy = GiftCardPolicy(
+            mode="reviewRequired",
+            industry_profile="gastronomy",
+            redeemable_categories=frozenset({"food", "drinks"}),
+            vat_rates=(Decimal("7"), Decimal("19")),
+        )
+        config = AccountingConfig(
+            currency=DEFAULT_CONFIG.currency,
+            product_rules=DEFAULT_CONFIG.product_rules,
+            category_environment=DEFAULT_CONFIG.category_environment,
+            gift_cards=policy,
+        )
+        detail = _gift_card_review_detail(config)
+        self.assertIn("gastronomy", detail)
+        self.assertIn("7%", detail)
+        self.assertIn("19%", detail)
+        self.assertIn("Mehrzweckgutschein-Kandidat", detail)
+        self.assertIn("Keine Buchungsfreigabe", detail)
+
+
+class TestCatalogReviewCommand(unittest.TestCase):
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_catalog_review_is_read_only_and_skips_lexware(
+        self, mock_args, mock_zettle_class, mock_setup_logging, _mock_load_dotenv
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date=None,
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            review_gift_cards=False,
+            review_catalog=True,
+            propose_config=False,
+        )
+        mock_zettle_class.return_value.get_products.return_value = [
+            {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
+            {"name": "Beispiel Zusatzleistung", "variants": [{"vatPercentage": 19}]},
+            {"name": "Verkauf", "variants": [{"vatPercentage": 19}]},
+        ]
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        self.assertIn("Katalogprüfung ohne Blocker", stdout.getvalue())
+        mock_zettle_class.return_value.get_products.assert_called_once_with()
+        mock_setup_logging.assert_not_called()
+
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_config_proposal_is_json_and_skips_lexware(
+        self, mock_args, mock_zettle_class, mock_setup_logging, _mock_load_dotenv
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date=None,
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            review_gift_cards=False,
+            review_catalog=False,
+            propose_config=True,
+        )
+        mock_zettle_class.return_value.get_products.return_value = [
+            {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
+        ]
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        proposal = __import__("json").loads(stdout.getvalue())
+        self.assertEqual(proposal["proposalStatus"], "reviewRequired")
+        mock_setup_logging.assert_not_called()
+
+
 # ── _process_day ──────────────────────────────────────────────────────────────
+
+class TestPreflightCommand(unittest.TestCase):
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.LexofficeClient")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_preflight_reads_zettle_without_lexware(
+        self,
+        mock_args,
+        mock_zettle_class,
+        mock_lexoffice_class,
+        mock_setup_logging,
+        _mock_load_dotenv,
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date="2026-09-01",
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            preflight=True,
+            review_gift_cards=False,
+            review_catalog=False,
+            propose_config=False,
+        )
+        mock_zettle_class.return_value.get_purchases_for_day.return_value = []
+
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        self.assertIn("KEINE TECHNISCHEN BLOCKER", stdout.getvalue())
+        mock_zettle_class.return_value.get_purchases_for_day.assert_called_once_with(
+            date(2026, 9, 1)
+        )
+        mock_lexoffice_class.assert_not_called()
+        mock_setup_logging.assert_not_called()
+
 
 class TestProcessDay(unittest.TestCase):
     def test_ok_cash_only(self):
@@ -138,12 +291,38 @@ class TestProcessDay(unittest.TestCase):
         self.assertEqual(status, STATUS_FAILED)
         self.assertIn("Lexoffice-Fehler", detail)
 
+    def test_failed_on_accounting_validation(self):
+        purchase = _purchase(service_cents=1000)
+        purchase["payments"][0]["amount"] = 1200
+        status, detail = _process_day(
+            TODAY, _mock_zettle([purchase]), _mock_lexoffice(), dry_run=False
+        )
+        self.assertEqual(status, STATUS_FAILED)
+        self.assertIn("Buchungsprüfung", detail)
+
     def test_detail_shows_bar_karte_split(self):
         zettle = _mock_zettle([_purchase(service_cents=11900)])
         lexoffice = _mock_lexoffice(["bar-id"])
         _, detail = _process_day(TODAY, zettle, lexoffice, dry_run=False)
         self.assertIn("Bar", detail)
         self.assertIn("Karte", detail)
+
+    def test_refund_detail_shows_separate_amount_and_net(self):
+        config = replace(DEFAULT_CONFIG, refund_mode="separateCreditNote")
+        lexoffice = _mock_lexoffice(["credit-id"])
+        status, detail = _process_day(
+            TODAY,
+            _mock_zettle([_refund_purchase()]),
+            lexoffice,
+            dry_run=False,
+            config=config,
+        )
+        self.assertEqual(status, STATUS_OK)
+        self.assertIn("Erstattungen 10.00", detail)
+        self.assertIn("Netto -10.00", detail)
+        summary = lexoffice.create_daily_vouchers.call_args.args[1]
+        self.assertEqual(summary.total_gross, Decimal("0"))
+        self.assertEqual(summary.refund_total_gross, Decimal("10.00"))
 
 
 if __name__ == "__main__":

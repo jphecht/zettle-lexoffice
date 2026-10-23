@@ -1,10 +1,8 @@
-import json
 import logging
 import time
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional
-from zoneinfo import ZoneInfo
+from typing import Mapping, Optional
 
 import requests
 
@@ -12,8 +10,7 @@ from aggregator import DailySummary
 
 logger = logging.getLogger(__name__)
 
-LEXOFFICE_BASE_URL = "https://api.lexoffice.io/v1"
-BERLIN_TZ = ZoneInfo("Europe/Berlin")
+LEXOFFICE_BASE_URL = "https://api.lexware.io/v1"
 _REMARK_PREFIX = "zettle-import"
 
 
@@ -21,16 +18,18 @@ class LexofficeAPIError(Exception):
     pass
 
 
+class LexofficeAmbiguousWriteError(LexofficeAPIError):
+    """A write may have reached Lexware Office although no result was received."""
+
+
 class LexofficeClient:
     def __init__(
         self,
         api_key: str,
-        service_category_id: str,
-        sales_category_id: str,
+        category_ids: Mapping[str, str],
         contact_id: str,
     ) -> None:
-        self._service_cat = service_category_id
-        self._sales_cat   = sales_category_id
+        self._category_ids = dict(category_ids)
         self._contact_id  = contact_id
         self._session = requests.Session()
         self._session.headers.update({
@@ -42,17 +41,21 @@ class LexofficeClient:
     # ── Duplicate detection ───────────────────────────────────────────────────
 
     def vouchers_exist_for_date(self, business_date: date) -> dict[str, bool]:
-        """Return which payment-type vouchers already exist for this date."""
-        date_str  = business_date.isoformat()
-        bar_mark  = f"{_REMARK_PREFIX}-{date_str}-bar"
-        karte_mark = f"{_REMARK_PREFIX}-{date_str}-karte"
-        result = {"bar": False, "karte": False}
+        """Return which sales and refund vouchers already exist for this date."""
+        date_str = business_date.isoformat()
+        markers = {
+            "bar": f"{_REMARK_PREFIX}-{date_str}-bar",
+            "karte": f"{_REMARK_PREFIX}-{date_str}-karte",
+            "bar-refund": f"{_REMARK_PREFIX}-{date_str}-bar-refund",
+            "karte-refund": f"{_REMARK_PREFIX}-{date_str}-karte-refund",
+        }
+        result = {key: False for key in markers}
 
         page = 0
         while True:
             data = self._get("/voucherlist", {
-                "voucherType": "salesinvoice",
-                "voucherStatus": "open,paid,voided,draft",
+                "voucherType": "salesinvoice,salescreditnote",
+                "voucherStatus": "any",
                 "voucherDateFrom": date_str,
                 "voucherDateTo": date_str,
                 "page": page,
@@ -61,9 +64,10 @@ class LexofficeClient:
             for item in data.get("content", []):
                 full = self._get(f"/vouchers/{item['id']}", {})
                 remark = full.get("remark", "")
-                if bar_mark   in remark: result["bar"]   = True
-                if karte_mark in remark: result["karte"] = True
-                if result["bar"] and result["karte"]:
+                for key, marker in markers.items():
+                    if remark == marker:
+                        result[key] = True
+                if all(result.values()):
                     return result
                 time.sleep(1)
 
@@ -81,24 +85,39 @@ class LexofficeClient:
         summary: DailySummary,
         dry_run: bool = False,
     ) -> list[str]:
-        """Create a Bar and/or Karte voucher for the day.
+        """Create separate sales and refund vouchers for Bar and/or Karte.
 
         Checks for existing vouchers first (skipped in dry-run).
         Returns the list of newly created voucher IDs.
         """
-        existing = {"bar": False, "karte": False}
+        existing = {
+            "bar": False,
+            "karte": False,
+            "bar-refund": False,
+            "karte-refund": False,
+        }
         if not dry_run:
             existing = self.vouchers_exist_for_date(business_date)
 
         created: list[str] = []
 
         if summary.has_cash and not existing["bar"]:
-            vid = self._create_one(business_date, summary, "bar", dry_run)
+            vid = self._create_one(business_date, summary, "bar", False, dry_run)
             if vid:
                 created.append(vid)
 
         if summary.has_card and not existing["karte"]:
-            vid = self._create_one(business_date, summary, "karte", dry_run)
+            vid = self._create_one(business_date, summary, "karte", False, dry_run)
+            if vid:
+                created.append(vid)
+
+        if summary.has_cash_refund and not existing["bar-refund"]:
+            vid = self._create_one(business_date, summary, "bar", True, dry_run)
+            if vid:
+                created.append(vid)
+
+        if summary.has_card_refund and not existing["karte-refund"]:
+            vid = self._create_one(business_date, summary, "karte", True, dry_run)
             if vid:
                 created.append(vid)
 
@@ -109,41 +128,50 @@ class LexofficeClient:
         business_date: date,
         summary: DailySummary,
         suffix: str,
+        refund: bool,
         dry_run: bool,
     ) -> Optional[str]:
-        payload = self._build_payload(business_date, summary, suffix)
+        payload = self._build_payload(business_date, summary, suffix, refund=refund)
         if dry_run:
             label = "BAR" if suffix == "bar" else "KARTE"
-            logger.info("[DRY-RUN] Would create %s voucher:\n%s",
-                        label, json.dumps(payload, indent=2, ensure_ascii=False))
+            document = "Gutschrift" if refund else "Beleg"
+            logger.info(
+                "[DRY-RUN] Würde %s-%s für %s mit %.2f EUR und %d Position(en) anlegen",
+                label,
+                document,
+                business_date,
+                payload["totalGrossAmount"],
+                len(payload["voucherItems"]),
+            )
             return None
         data = self._post("/vouchers", payload)
-        vid: str = data["id"]
-        logger.info("Lexoffice %s voucher created for %s → id=%s",
-                    suffix.upper(), business_date, vid)
+        vid = data.get("id")
+        if not isinstance(vid, str) or not vid:
+            raise LexofficeAPIError("Lexware-Antwort enthält keine Beleg-ID")
+        document = "refund" if refund else "sales"
+        logger.info(
+            "Lexoffice %s %s voucher created for %s → id=%s",
+            suffix.upper(), document, business_date, vid,
+        )
         return vid
 
     def _build_payload(
-        self, business_date: date, summary: DailySummary, suffix: str
+        self,
+        business_date: date,
+        summary: DailySummary,
+        suffix: str,
+        refund: bool = False,
     ) -> dict:
-        voucher_dt = datetime(
-            business_date.year, business_date.month, business_date.day,
-            tzinfo=BERLIN_TZ,
-        )
         date_str = business_date.isoformat()
 
         if suffix == "bar":
             items = _build_items(
-                summary.cash_service_gross, summary.cash_service_vat,
-                summary.cash_sales_gross,   summary.cash_sales_vat,
-                self._service_cat, self._sales_cat,
+                summary, "cash", self._category_ids, refund=refund
             )
             label = "Bar"
         else:
             items = _build_items(
-                summary.card_service_gross, summary.card_service_vat,
-                summary.card_sales_gross,   summary.card_sales_vat,
-                self._service_cat, self._sales_cat,
+                summary, "card", self._category_ids, refund=refund
             )
             label = "Karte"
 
@@ -151,17 +179,25 @@ class LexofficeClient:
         total_vat   = round(sum(i["taxAmount"] for i in items), 2)
 
         return {
-            "type": "salesinvoice",
-            "voucherDate": voucher_dt.isoformat(),
+            "type": "salescreditnote" if refund else "salesinvoice",
+            "voucherDate": date_str,
             "taxType": "gross",
             "totalGrossAmount": total_gross,
             "totalTaxAmount":   total_vat,
-            "voucherNumber":    f"ZETTLE-{date_str}-{suffix.upper()}",
+            "voucherNumber": (
+                f"ZETTLE-{date_str}-{suffix.upper()}"
+                + ("-REFUND" if refund else "")
+            ),
             "contactId":        self._contact_id,
             "introduction": (
-                f"Tagessammelbeleg {label} {business_date.strftime('%d.%m.%Y')}"
+                f"Tagesgutschrift {label} {business_date.strftime('%d.%m.%Y')}"
+                if refund
+                else f"Tagessammelbeleg {label} {business_date.strftime('%d.%m.%Y')}"
             ),
-            "remark": f"{_REMARK_PREFIX}-{date_str}-{suffix}",
+            "remark": (
+                f"{_REMARK_PREFIX}-{date_str}-{suffix}"
+                + ("-refund" if refund else "")
+            ),
             "voucherItems": items,
         }
 
@@ -176,7 +212,7 @@ class LexofficeClient:
         return self._request("GET", path, params=params)
 
     def _post(self, path: str, body: dict) -> dict:
-        return self._request("POST", path, json_body=body)
+        return self._request("POST", path, json_body=body, retry_mutating=False)
 
     def _request(
         self,
@@ -185,6 +221,7 @@ class LexofficeClient:
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
         max_retries: int = 3,
+        retry_mutating: bool = False,
     ) -> dict:
         url = LEXOFFICE_BASE_URL + path
         delay = 1.0
@@ -196,12 +233,30 @@ class LexofficeClient:
                 )
                 if resp.ok:
                     return resp.json() if resp.content else {}
-                if resp.status_code in (429, 500, 502, 503, 504):
+                if resp.status_code == 429:
+                    raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
+                if resp.status_code in (500, 502, 503, 504):
+                    if method != "GET" and not retry_mutating:
+                        raise LexofficeAmbiguousWriteError(
+                            f"{method} {path} endete mit HTTP {resp.status_code}; "
+                            "der Beleg kann dennoch erstellt worden sein. "
+                            "Ein erneuter Programmlauf prüft zuerst auf Duplikate."
+                        )
                     raise requests.HTTPError(f"HTTP {resp.status_code}", response=resp)
                 raise LexofficeAPIError(
-                    f"{method} {url} failed with HTTP {resp.status_code}: {resp.text}"
+                    f"{method} {path} failed with HTTP {resp.status_code}"
                 )
             except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                if method != "GET" and not retry_mutating and not (
+                    isinstance(exc, requests.HTTPError)
+                    and exc.response is not None
+                    and exc.response.status_code == 429
+                ):
+                    raise LexofficeAmbiguousWriteError(
+                        f"{method} {path} ohne eindeutige Antwort; der Beleg kann "
+                        "erstellt worden sein. Ein erneuter Programmlauf prüft "
+                        "zuerst auf Duplikate."
+                    ) from exc
                 if attempt == max_retries:
                     raise LexofficeAPIError(
                         f"{method} {url} failed after {max_retries} attempt(s): {exc}"
@@ -219,27 +274,42 @@ class LexofficeClient:
 # ── Payload helpers ───────────────────────────────────────────────────────────
 
 def _build_items(
-    service_gross: Decimal, service_vat: Decimal,
-    sales_gross: Decimal,   sales_vat: Decimal,
-    service_cat: str, sales_cat: str,
+    summary: DailySummary,
+    payment_method: str,
+    category_ids: Mapping[str, str],
+    refund: bool = False,
 ) -> list[dict]:
-    items = []
-    if service_gross:
-        items.append(_item(service_gross, service_vat, service_cat))
-    if sales_gross:
-        items.append(_item(sales_gross, sales_vat, sales_cat))
+    items: list[dict] = []
+    gross_attribute = f"{payment_method}_gross"
+    lines = (
+        summary.refund_items_for_payment(payment_method)
+        if refund
+        else summary.items_for_payment(payment_method)
+    )
+    for line in lines:
+        category_id = category_ids.get(line.category)
+        if not category_id:
+            raise LexofficeAPIError(
+                f"Keine Lexware-Kategorie-ID für {line.category!r} konfiguriert"
+            )
+        items.append(
+            _item(getattr(line, gross_attribute), line.vat_rate, category_id)
+        )
     return items
 
 
-def _item(gross: Decimal, _vat_ignored: Decimal, category_id: str) -> dict:
-    # Recalculate VAT from the aggregated gross to avoid accumulated rounding
-    # errors from per-product splits that Lexoffice rejects as invalid_taxamount.
-    vat = (gross * Decimal("0.19") / Decimal("1.19")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
+def _item(gross: Decimal, vat_rate: Decimal, category_id: str) -> dict:
+    rate = vat_rate / 100
+    vat = (
+        Decimal("0.00")
+        if rate == 0
+        else (gross * rate / (1 + rate)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
     )
     return {
         "amount":         float(gross),
         "taxAmount":      float(vat),
-        "taxRatePercent": 19.0,
+        "taxRatePercent": float(vat_rate),
         "categoryId":     category_id,
     }
