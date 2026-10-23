@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from zettle_client import (
     CARD_PAYMENT_TYPES,
+    CASH_PAYMENT_TYPES,
     ZETTLE_PRODUCT_API,
     ZettleAPIError,
     ZettleAuthError,
@@ -296,6 +297,11 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("IZETTLE_CARD", CARD_PAYMENT_TYPES)
         self.assertIn("PAYPAL", CARD_PAYMENT_TYPES)
         self.assertNotIn("CASH", CARD_PAYMENT_TYPES)
+
+    def test_cash_payment_types(self):
+        self.assertIn("CASH", CASH_PAYMENT_TYPES)
+        self.assertIn("IZETTLE_CASH", CASH_PAYMENT_TYPES)
+        self.assertNotIn("IZETTLE_CARD", CASH_PAYMENT_TYPES)
 
 
 if __name__ == "__main__":
