@@ -189,6 +189,47 @@ Ohne eigene Konfiguration bleibt `refunds` auf `reject`; das bisherige Verhalten
 ändert sich daher nicht. Die verwendeten Produktnamen und Steuersätze müssen auch
 bei der Rückerstattung eindeutig in `accounting.json` zugeordnet sein.
 
+#### Gutschein-Vorprüfung nach Branche und Sortiment
+
+Gutscheine werden noch nicht nach Lexware übertragen. Sie können jedoch bereits
+für die spätere Einrichtung fachlich vorgeprüft werden:
+
+```json
+"giftCards": {
+  "mode": "reviewRequired",
+  "industryProfile": "hairAndBeauty",
+  "redeemableCategories": ["service", "sales"]
+}
+```
+
+Das Branchenprofil ist nur eine beschreibende Vorauswahl. Maßgeblich sind die
+Kategorien, für die der Gutschein nach seinen Bedingungen tatsächlich
+eingelöst werden darf, und deren konfigurierte Steuersätze:
+
+- genau ein Steuersatz: `singlePurposeCandidate`
+- mehrere Steuersätze: `multiPurposeCandidate`
+
+Beide Ergebnisse sind ausdrücklich nur Prüfvorschläge. Auch bei nur einem
+Steuersatz müssen insbesondere Leistungsort und Gutscheinbedingungen bestätigt
+werden. Das Programm aktiviert daher keine Buchungslogik automatisch.
+Zettle-Produkte vom Typ `GIFTCARD` und Gutscheinzahlungen werden weiterhin mit
+einer verständlichen Fehlermeldung vor jedem Lexware-Schreibzugriff blockiert.
+Ein später neu hinzukommender Steuersatz verändert die Vorprüfung anhand der
+konfigurierten einlösbaren Kategorien.
+
+Ohne Vorprüfung bleibt `"giftCards": "reject"`. Ein Modus zur tatsächlichen
+Verbuchung von Einzweck- oder Mehrzweckgutscheinen wird absichtlich noch nicht
+akzeptiert.
+
+Die Vorprüfung lässt sich ohne Zugangsdatenzugriff und ohne API-Aufruf anzeigen:
+
+```bash
+python main.py --review-gift-cards
+```
+
+Der Befehl liest ausschließlich die lokale `accounting.json` und meldet Branche,
+einlösbare Kategorien, gefundene Steuersätze sowie den Prüfvorschlag.
+
 ---
 
 ### Fertige `.env`
@@ -225,6 +266,9 @@ python main.py --from 2025-01-01 --to 2025-05-31
 
 # Trockenlauf — liest Zettle, schreibt aber nicht in Lexware Office
 python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
+
+# Gutschein-Konfiguration lokal prüfen — keine API-Aufrufe
+python main.py --review-gift-cards
 ```
 
 ### Beispielausgabe (Bulk-Import)

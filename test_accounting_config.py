@@ -51,6 +51,9 @@ class TestAccountingConfig(unittest.TestCase):
         config = load_accounting_config(str(example))
         self.assertEqual(config.tip_mode, "byCashier")
         self.assertEqual(config.tip_rule_for_user(1002).role, "employee")
+        self.assertEqual(
+            config.gift_cards.recommendation, "singlePurposeCandidate"
+        )
 
     def test_loads_multiple_categories_and_rates(self):
         config = self._load(_valid_config())
@@ -107,6 +110,47 @@ class TestAccountingConfig(unittest.TestCase):
     def test_unknown_refund_mode_is_rejected(self):
         data = _valid_config()
         data["adjustments"]["refunds"] = "netWithSales"
+        with self.assertRaises(ConfigurationError):
+            self._load(data)
+
+    def test_gift_card_review_suggests_multiple_purpose_for_mixed_rates(self):
+        data = _valid_config()
+        data["adjustments"]["giftCards"] = {
+            "mode": "reviewRequired",
+            "industryProfile": "gastronomy",
+            "redeemableCategories": ["service", "food"],
+        }
+        config = self._load(data)
+        self.assertEqual(
+            config.gift_cards.recommendation, "multiPurposeCandidate"
+        )
+        self.assertEqual(config.gift_cards.vat_rates, (Decimal("7"), Decimal("19")))
+
+    def test_gift_card_review_suggests_single_purpose_for_one_rate(self):
+        data = _valid_config()
+        data["adjustments"]["giftCards"] = {
+            "mode": "reviewRequired",
+            "industryProfile": "hairAndBeauty",
+            "redeemableCategories": ["service"],
+        }
+        config = self._load(data)
+        self.assertEqual(
+            config.gift_cards.recommendation, "singlePurposeCandidate"
+        )
+
+    def test_gift_card_review_rejects_unknown_category(self):
+        data = _valid_config()
+        data["adjustments"]["giftCards"] = {
+            "mode": "reviewRequired",
+            "industryProfile": "retail",
+            "redeemableCategories": ["missing"],
+        }
+        with self.assertRaises(ConfigurationError):
+            self._load(data)
+
+    def test_gift_card_booking_mode_cannot_be_enabled_yet(self):
+        data = _valid_config()
+        data["adjustments"]["giftCards"] = {"mode": "singlePurpose"}
         with self.assertRaises(ConfigurationError):
             self._load(data)
 

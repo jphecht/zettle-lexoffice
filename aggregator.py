@@ -332,6 +332,10 @@ def _process_purchase(
             if gratuity and config.tip_mode != "byCashier":
                 raise AggregationError("Trinkgeld ist nicht konfiguriert")
         payment_type = payment.get("type")
+        if payment_type in {"GIFTCARD", "GIFT_CARD"}:
+            raise AggregationError(
+                _gift_card_block_message(config, "Gutscheinzahlung")
+            )
         if payment_type in CARD_PAYMENT_TYPES:
             card_minor += amount - gratuity
             card_tip_minor += gratuity
@@ -373,6 +377,10 @@ def _process_purchase(
     for product in products:
         if not isinstance(product, dict):
             raise AggregationError("Ungültige Produktposition im Zettle-Kauf")
+        if product.get("type") == "GIFTCARD":
+            raise AggregationError(
+                _gift_card_block_message(config, "Gutscheinverkauf")
+            )
         name = product.get("name")
         if not isinstance(name, str):
             raise AggregationError("Zettle-Produkt ohne gültigen Namen")
@@ -424,6 +432,17 @@ def _process_purchase(
             tip_rule.vat_rate,
             (card_tip_minor / 100).quantize(CENT),
         )
+
+
+def _gift_card_block_message(config: AccountingConfig, event: str) -> str:
+    recommendation = config.gift_cards.recommendation
+    if recommendation == "singlePurposeCandidate":
+        review = "Vorprüfung: Einzweckgutschein-Kandidat"
+    elif recommendation == "multiPurposeCandidate":
+        review = "Vorprüfung: Mehrzweckgutschein-Kandidat"
+    else:
+        review = "keine fachliche Gutscheinprüfung konfiguriert"
+    return f"Zettle-{event} ist gesperrt ({review})"
 
 
 def _allocate_balanced(

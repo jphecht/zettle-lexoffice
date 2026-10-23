@@ -47,6 +47,11 @@
         }
       ]
     },
-    "refunds": "separateCreditNote"
+    "refunds": "separateCreditNote",
+    "giftCards": {
+      "mode": "reviewRequired",
+      "industryProfile": "hairAndBeauty",
+      "redeemableCategories": ["service", "sales"]
+    }
   }
 }
