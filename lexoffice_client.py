@@ -2,7 +2,7 @@ import logging
 import time
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional
+from typing import Mapping, Optional
 
 import requests
 
@@ -26,12 +26,10 @@ class LexofficeClient:
     def __init__(
         self,
         api_key: str,
-        service_category_id: str,
-        sales_category_id: str,
+        category_ids: Mapping[str, str],
         contact_id: str,
     ) -> None:
-        self._service_cat = service_category_id
-        self._sales_cat   = sales_category_id
+        self._category_ids = dict(category_ids)
         self._contact_id  = contact_id
         self._session = requests.Session()
         self._session.headers.update({
@@ -137,18 +135,10 @@ class LexofficeClient:
         date_str = business_date.isoformat()
 
         if suffix == "bar":
-            items = _build_items(
-                summary.cash_service_gross, summary.cash_service_vat,
-                summary.cash_sales_gross,   summary.cash_sales_vat,
-                self._service_cat, self._sales_cat,
-            )
+            items = _build_items(summary, "cash", self._category_ids)
             label = "Bar"
         else:
-            items = _build_items(
-                summary.card_service_gross, summary.card_service_vat,
-                summary.card_sales_gross,   summary.card_sales_vat,
-                self._service_cat, self._sales_cat,
-            )
+            items = _build_items(summary, "card", self._category_ids)
             label = "Karte"
 
         total_gross = round(sum(i["amount"]    for i in items), 2)
@@ -242,27 +232,36 @@ class LexofficeClient:
 # ── Payload helpers ───────────────────────────────────────────────────────────
 
 def _build_items(
-    service_gross: Decimal, service_vat: Decimal,
-    sales_gross: Decimal,   sales_vat: Decimal,
-    service_cat: str, sales_cat: str,
+    summary: DailySummary,
+    payment_method: str,
+    category_ids: Mapping[str, str],
 ) -> list[dict]:
-    items = []
-    if service_gross:
-        items.append(_item(service_gross, service_vat, service_cat))
-    if sales_gross:
-        items.append(_item(sales_gross, sales_vat, sales_cat))
+    items: list[dict] = []
+    gross_attribute = f"{payment_method}_gross"
+    for line in summary.items_for_payment(payment_method):
+        category_id = category_ids.get(line.category)
+        if not category_id:
+            raise LexofficeAPIError(
+                f"Keine Lexware-Kategorie-ID für {line.category!r} konfiguriert"
+            )
+        items.append(
+            _item(getattr(line, gross_attribute), line.vat_rate, category_id)
+        )
     return items
 
 
-def _item(gross: Decimal, _vat_ignored: Decimal, category_id: str) -> dict:
-    # Recalculate VAT from the aggregated gross to avoid accumulated rounding
-    # errors from per-product splits that Lexoffice rejects as invalid_taxamount.
-    vat = (gross * Decimal("0.19") / Decimal("1.19")).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
+def _item(gross: Decimal, vat_rate: Decimal, category_id: str) -> dict:
+    rate = vat_rate / 100
+    vat = (
+        Decimal("0.00")
+        if rate == 0
+        else (gross * rate / (1 + rate)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
     )
     return {
         "amount":         float(gross),
         "taxAmount":      float(vat),
-        "taxRatePercent": 19.0,
+        "taxRatePercent": float(vat_rate),
         "categoryId":     category_id,
     }
