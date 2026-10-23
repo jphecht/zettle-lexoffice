@@ -6,20 +6,22 @@ Each purchase amount is split into:
   - card × service   (Kartenzahlung × Dienstleistung)
   - card × sales     (Kartenzahlung × Warenverkauf)
 
-For purchases with mixed payment (partially cash + card), product amounts
-are split proportionally by the payment fractions.
+For purchases with mixed payment (partially cash + card), the four buckets
+are balanced so both payment totals and product-type totals remain exact.
 VAT rate: 19% for all products.
 """
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
-import logging
+from decimal import Decimal, DecimalException, ROUND_HALF_UP
 
-from zettle_client import CARD_PAYMENT_TYPES
-
-logger = logging.getLogger(__name__)
+from zettle_client import CARD_PAYMENT_TYPES, CASH_PAYMENT_TYPES
 
 VAT_RATE = Decimal("0.19")
 SERVICE_PRODUCT_NAMES = {"Dienstleistung", "Damen WaSchFö"}
+SALES_PRODUCT_NAMES = {"Verkauf"}
+
+
+class AggregationError(ValueError):
+    """Raised when a purchase cannot be booked without making assumptions."""
 
 
 @dataclass
@@ -88,8 +90,8 @@ class DailySummary:
 def aggregate(purchases: list[dict]) -> DailySummary:
     """Build a DailySummary from raw Zettle purchases.
 
-    For each purchase, payment amounts determine the cash/card split fractions.
-    Product amounts are then distributed proportionally across the 4 buckets.
+    Unknown payment/product types and unreconciled totals are rejected instead
+    of being silently assigned to a potentially wrong accounting category.
     """
     summary = DailySummary()
     for purchase in purchases:
@@ -100,47 +102,96 @@ def aggregate(purchases: list[dict]) -> DailySummary:
 # ── Per-purchase logic ────────────────────────────────────────────────────────
 
 def _process_purchase(summary: DailySummary, purchase: dict) -> None:
-    # Step 1: cash vs card fractions from payment amounts (in minor units)
+    if not isinstance(purchase, dict):
+        raise AggregationError("Ungültiger Zettle-Kauf: Objekt erwartet")
+
+    # Step 1: cash vs card totals from payment amounts (in minor units)
     cash_minor = Decimal("0")
     card_minor = Decimal("0")
-    for payment in purchase.get("payments", []):
+    payments = purchase.get("payments", [])
+    if not isinstance(payments, list):
+        raise AggregationError("Ungültige Zahlungsliste im Zettle-Kauf")
+    for payment in payments:
         if not isinstance(payment, dict):
-            continue
-        amount = Decimal(str(payment.get("amount", 0)))
-        if payment.get("type") in CARD_PAYMENT_TYPES:
+            raise AggregationError("Ungültige Zahlungsposition im Zettle-Kauf")
+        try:
+            amount = Decimal(str(payment["amount"]))
+        except (KeyError, ValueError, TypeError, DecimalException) as exc:
+            raise AggregationError("Ungültiger Zahlungsbetrag im Zettle-Kauf") from exc
+        if not amount.is_finite() or amount != amount.to_integral_value():
+            raise AggregationError("Zahlungsbetrag muss eine ganze Anzahl Cent sein")
+        if amount < 0:
+            raise AggregationError(
+                "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
+            )
+        payment_type = payment.get("type")
+        if payment_type in CARD_PAYMENT_TYPES:
             card_minor += amount
-        else:
+        elif payment_type in CASH_PAYMENT_TYPES:
             cash_minor += amount
+        else:
+            raise AggregationError(
+                f"Unbekannter Zettle-Zahlungstyp: {payment_type!r}"
+            )
 
-    total_payment = cash_minor + card_minor
-    if total_payment == Decimal("0"):
+    total_payment_minor = cash_minor + card_minor
+    if total_payment_minor == Decimal("0"):
+        if purchase.get("products"):
+            raise AggregationError("Zettle-Kauf enthält Produkte, aber keine Zahlung")
         return
 
-    cash_frac = cash_minor / total_payment
-    card_frac = card_minor / total_payment
-
-    # Step 2: product gross amounts split into service vs sales
-    for prod in purchase.get("products", []):
+    # Step 2: exact product totals for service vs sales.
+    service_gross = Decimal("0")
+    sales_gross = Decimal("0")
+    products = purchase.get("products", [])
+    if not isinstance(products, list):
+        raise AggregationError("Ungültige Produktliste im Zettle-Kauf")
+    for prod in products:
         if not isinstance(prod, dict):
-            continue
+            raise AggregationError("Ungültige Produktposition im Zettle-Kauf")
         gross = _product_gross(prod)
         if gross == Decimal("0"):
             continue
 
         name = prod.get("name", "")
         if name in SERVICE_PRODUCT_NAMES:
-            _add(summary, "cash_service", gross, cash_frac)
-            _add(summary, "card_service", gross, card_frac)
+            service_gross += gross
+        elif name in SALES_PRODUCT_NAMES:
+            sales_gross += gross
         else:
-            if name not in ("Verkauf",):
-                logger.warning("Unbekannter Produktname %r → als Warenverkauf gebucht", name)
-            _add(summary, "cash_sales", gross, cash_frac)
-            _add(summary, "card_sales", gross, card_frac)
+            raise AggregationError(f"Unbekannter Zettle-Produktname: {name!r}")
+
+    payment_gross = (total_payment_minor / 100).quantize(Decimal("0.01"))
+    product_gross = service_gross + sales_gross
+    if product_gross != payment_gross:
+        raise AggregationError(
+            "Zahlungs- und Produktsumme stimmen nicht überein; "
+            "Trinkgeld, Rabatt, Gutschein oder Gebühren sind nicht unterstützt"
+        )
+
+    # Balanced 2×2 allocation: exact payment and product-type totals survive
+    # the cent rounding required for mixed payments.
+    cash_gross = (cash_minor / 100).quantize(Decimal("0.01"))
+    ideal_cash_service = service_gross * cash_gross / product_gross
+    cash_service = ideal_cash_service.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    lower_bound = max(Decimal("0"), cash_gross - sales_gross)
+    upper_bound = min(service_gross, cash_gross)
+    cash_service = min(max(cash_service, lower_bound), upper_bound)
+
+    allocations = {
+        "cash_service": cash_service,
+        "cash_sales": cash_gross - cash_service,
+        "card_service": service_gross - cash_service,
+        "card_sales": sales_gross - (cash_gross - cash_service),
+    }
+    for bucket, gross in allocations.items():
+        _add(summary, bucket, gross)
 
 
-def _add(summary: DailySummary, bucket: str, gross_total: Decimal, frac: Decimal) -> None:
-    """Round proportional gross and add it with VAT to the given bucket."""
-    gross = (gross_total * frac).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+def _add(summary: DailySummary, bucket: str, gross: Decimal) -> None:
+    """Add an exact gross amount with its VAT to the given bucket."""
+    if gross == Decimal("0"):
+        return
     vat   = _vat_from_gross(gross)
     net   = gross - vat
     setattr(summary, f"{bucket}_gross", getattr(summary, f"{bucket}_gross") + gross)
@@ -153,10 +204,17 @@ def _add(summary: DailySummary, bucket: str, gross_total: Decimal, frac: Decimal
 def _product_gross(prod: dict) -> Decimal:
     try:
         qty        = Decimal(str(prod.get("quantity", "1")))
-        unit_minor = Decimal(str(prod.get("unitPrice", 0)))
-        return (qty * unit_minor / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    except Exception:
-        return Decimal("0")
+        unit_minor = Decimal(str(prod["unitPrice"]))
+    except (KeyError, ValueError, TypeError, DecimalException) as exc:
+        raise AggregationError("Ungültiger Produktbetrag im Zettle-Kauf") from exc
+    if not qty.is_finite() or not unit_minor.is_finite():
+        raise AggregationError("Produktbetrag muss eine endliche Zahl sein")
+    if qty < 0 or unit_minor < 0:
+        raise AggregationError(
+            "Rückerstattungen/Stornierungen werden noch nicht unterstützt"
+        )
+    gross = (qty * unit_minor / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return gross
 
 
 def _vat_from_gross(gross: Decimal) -> Decimal:

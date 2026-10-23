@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -22,13 +23,15 @@ CARD_PAYMENT_TYPES = {
     "VIPPS",
     "SWISH",
 }
-
-
-class ZettleAuthError(Exception):
-    pass
+CASH_PAYMENT_TYPES = {"CASH"}
+BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
 
 class ZettleAPIError(Exception):
+    pass
+
+
+class ZettleAuthError(ZettleAPIError):
     pass
 
 
@@ -59,7 +62,7 @@ class ZettleClient:
 
         if not resp.ok:
             raise ZettleAuthError(
-                f"Token exchange failed (HTTP {resp.status_code}): {resp.text}"
+                f"Token exchange failed (HTTP {resp.status_code})"
             )
 
         body = resp.json()
@@ -113,19 +116,22 @@ class ZettleClient:
     # ── Purchase retrieval ────────────────────────────────────────────────────
 
     def get_purchases_for_day(self, business_date: date) -> list[dict]:
-        """Return all purchases for *business_date* (UTC midnight to midnight).
+        """Return all purchases for a Europe/Berlin business day.
 
         The Zettle API ignores stopDate and returns all purchases from startDate
         onwards, so we filter the results by timestamp in Python.
         """
-        start_dt = datetime(
+        local_start = datetime(
             business_date.year, business_date.month, business_date.day,
-            0, 0, 0, tzinfo=timezone.utc,
+            0, 0, 0, tzinfo=BERLIN_TZ,
         )
-        stop_dt = start_dt + timedelta(days=1)
+        local_stop = local_start + timedelta(days=1)
+        start_dt = local_start.astimezone(timezone.utc)
+        stop_dt = local_stop.astimezone(timezone.utc)
 
         purchases: list[dict] = []
         last_hash: Optional[str] = None
+        seen_hashes: set[str] = set()
 
         while True:
             params: dict = {
@@ -137,7 +143,9 @@ class ZettleClient:
                 params["lastPurchaseHash"] = last_hash
 
             data = self._get(ZETTLE_PURCHASE_API, params)
-            page: list[dict] = data.get("purchases", [])
+            page = data.get("purchases", [])
+            if not isinstance(page, list):
+                raise ZettleAPIError("Zettle-Antwort enthält keine gültige Kaufliste")
 
             in_range = [p for p in page if _purchase_in_range(p, start_dt, stop_dt)]
             purchases.extend(in_range)
@@ -147,7 +155,17 @@ class ZettleClient:
             if _any_past_range(page, stop_dt) or len(page) < 1000 or not data.get("linkUrls"):
                 break
 
-            last_hash = data.get("lastPurchaseHash")
+            next_hash = data.get("lastPurchaseHash")
+            if not isinstance(next_hash, str) or not next_hash:
+                raise ZettleAPIError(
+                    "Zettle meldet weitere Seiten ohne lastPurchaseHash"
+                )
+            if next_hash == last_hash or next_hash in seen_hashes:
+                raise ZettleAPIError(
+                    "Zettle-Paginierung wiederholt lastPurchaseHash"
+                )
+            seen_hashes.add(next_hash)
+            last_hash = next_hash
             logger.debug("Paginating Zettle results, lastPurchaseHash=%s", last_hash)
             time.sleep(1)
 
@@ -161,8 +179,8 @@ def _extract_client_id(api_key: str) -> str:
     """Extract client_id from the JWT payload of the Zettle API key."""
     try:
         payload_part = api_key.split(".")[1]
-        padding = "=" * (4 - len(payload_part) % 4)
-        payload = json.loads(base64.b64decode(payload_part + padding))
+        padding = "=" * (-len(payload_part) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_part + padding))
         return payload["client_id"]
     except Exception as exc:
         raise ZettleAuthError(f"Could not extract client_id from API key: {exc}") from exc
@@ -172,24 +190,25 @@ def _fmt_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000+0000")
 
 
-def _parse_purchase_ts(purchase: dict) -> Optional[datetime]:
+def _parse_purchase_ts(purchase: dict) -> datetime:
+    if not isinstance(purchase, dict):
+        raise ZettleAPIError("Ungültiger Zettle-Kauf in API-Antwort")
     ts_str = purchase.get("timestamp") or purchase.get("created")
     if not ts_str:
-        return None
+        raise ZettleAPIError("Zettle-Kauf ohne Zeitstempel")
     try:
         dt = datetime.fromisoformat(ts_str.replace("+0000", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
+        if dt.tzinfo is None:
+            raise ValueError("timezone missing")
+        return dt
+    except (ValueError, TypeError) as exc:
+        raise ZettleAPIError("Zettle-Kauf mit ungültigem Zeitstempel") from exc
 
 
 def _purchase_in_range(purchase: dict, start: datetime, stop: datetime) -> bool:
     ts = _parse_purchase_ts(purchase)
-    return start <= ts < stop if ts is not None else True
+    return start <= ts < stop
 
 
 def _any_past_range(page: list[dict], stop: datetime) -> bool:
-    return any(
-        ts is not None and ts >= stop
-        for ts in (_parse_purchase_ts(p) for p in page)
-    )
+    return any(_parse_purchase_ts(p) >= stop for p in page)
