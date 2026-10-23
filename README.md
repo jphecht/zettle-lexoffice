@@ -7,17 +7,17 @@ verbunden.
 **Was das Script macht:**
 - Ruft alle Kassenvorgänge eines Tages über die Zettle Purchase API ab
 - Trennt Kartenzahlungen und Barzahlungen
-- Rechnet 19 % MwSt heraus (Brutto → Netto + Steuer)
+- Rechnet konfigurierte Umsatzsteuersätze aus Bruttobeträgen heraus
 - Legt je einen Bar- und Karten-Sammelbeleg (`salesinvoice`) in Lexware Office an
 - Schützt vor Doppel-Import und überspringt umsatzlose Tage
 - Bricht bei unbekannten oder nicht abgestimmten Daten ab, statt sie zu schätzen
 
-> **Wichtige Einschränkung:** Unterstützt werden derzeit nur die Produktnamen
-> `Dienstleistung`, `Damen WaSchFö` und `Verkauf`, 19 % Umsatzsteuer sowie
-> positive Bar- und Kartenzahlungen.
-> Trinkgeld, Rabatte, Gutscheine, Gebühren, Stornos und Rückerstattungen werden
-> nicht automatisch verbucht. Erkennt das Programm solche Abweichungen, legt es
-> keinen Beleg an.
+> **Wichtige Einschränkung:** Ohne eigene Konfiguration bleibt das bisherige
+> Verhalten mit `Dienstleistung`, `Damen WaSchFö`, `Verkauf` und 19 % erhalten.
+> Eine eigene JSON-Datei kann Namen, Kategorien, Steuersätze und Rabatte
+> konfigurieren. Trinkgeld, Gutscheine, Gebühren, Stornos und Rückerstattungen
+> bleiben zunächst gesperrt. Erkennt das Programm eine nicht konfigurierte
+> Abweichung, legt es keinen Beleg an.
 
 ---
 
@@ -101,7 +101,7 @@ from dotenv import load_dotenv
 from lexoffice_client import LexofficeClient
 
 load_dotenv()
-client = LexofficeClient(os.environ["LEXOFFICE_API_KEY"], "", "", "")
+client = LexofficeClient(os.environ["LEXOFFICE_API_KEY"], {}, "")
 cats = client.list_posting_categories()
 for c in cats:
     if "19" in c.get("name", "") or "Erlös" in c.get("name", ""):
@@ -116,6 +116,30 @@ LEXOFFICE_SALES_CATEGORY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 LEXOFFICE_CONTACT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
+### Schritt 4 — Eigene Produkte und Steuersätze konfigurieren (optional)
+
+Ohne weitere Einstellung bleibt die bisherige, erprobte Zuordnung aktiv. Für
+eigene Produktnamen oder zusätzliche Steuersätze:
+
+```bash
+cp accounting.example.json accounting.json
+```
+
+In `accounting.json` lassen sich beliebig viele Produktnamen einer Kategorie
+und einem Steuersatz zuordnen. Jede Kategorie verweist auf den Namen einer
+Umgebungsvariable, welche die passende Lexware-Kategorie-ID enthält. Danach in
+`.env` ergänzen:
+
+```dotenv
+ACCOUNTING_CONFIG=accounting.json
+```
+
+`accounting.json` ist absichtlich in `.gitignore`. Die Beispieldatei aktiviert
+Rabatte mit `"discounts": "useGrossValue"`; dafür wird der von Zettle gemeldete
+tatsächliche Bruttowert verwendet. Nicht zugeordnete Produktnamen oder
+abweichende Steuersätze führen weiterhin sicher zum Abbruch des betreffenden
+Tages.
+
 ---
 
 ### Fertige `.env`
@@ -126,6 +150,8 @@ LEXOFFICE_API_KEY=...
 LEXOFFICE_SERVICE_CATEGORY_ID=...
 LEXOFFICE_SALES_CATEGORY_ID=...
 LEXOFFICE_CONTACT_ID=...
+# Nur bei eigener Datei erforderlich:
+ACCOUNTING_CONFIG=accounting.json
 ```
 
 ---
@@ -216,7 +242,9 @@ zettle-lexoffice/
 ├── main.py               # CLI-Einstiegspunkt & Orchestrierung
 ├── zettle_client.py      # Zettle Purchase API (OAuth2/JWT, Pagination, Retry)
 ├── lexoffice_client.py   # Lexware API (Voucher-Erstellung, Duplikat-Prüfung)
-├── aggregator.py         # MwSt-Herausrechnung, Karte/Bar-Trennung
+├── accounting_config.py  # validierte Produkt-, Kategorie- und Steuerregeln
+├── accounting.example.json
+├── aggregator.py         # Aggregation nach Zahlungsart, Kategorie und Steuer
 ├── requirements.txt
 ├── requirements.lock     # reproduzierbar geprüfte Paketversionen
 ├── SECURITY.md
@@ -260,8 +288,8 @@ Dateien sowie die Git-Historie auf typische Zugangsdatenmuster.
   `Europe/Berlin`, einschließlich Sommer-/Winterzeit.
 - Die Summen aus Zahlungs- und Produktpositionen müssen centgenau
   übereinstimmen.
-- Die Währung muss EUR sein; ein explizit von 19 % abweichender Zettle-Steuersatz
-  wird abgelehnt.
+- Die Währung muss EUR sein; Zettle-Steuersatz und konfigurierte Produktregel
+  müssen übereinstimmen.
 - Belege tragen einen stabilen Marker wie `zettle-import-YYYY-MM-DD-bar`.
   Vor dem Schreiben wird in Lexware Office danach gesucht.
 - Der Schutz verhindert normale Wiederholungen, ersetzt aber keine serverseitige

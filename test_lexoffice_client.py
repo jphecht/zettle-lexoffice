@@ -6,14 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from aggregator import DailySummary, _vat_from_gross
+from aggregator import DailySummary
 from lexoffice_client import (
     LEXOFFICE_BASE_URL,
     LexofficeAPIError,
     LexofficeAmbiguousWriteError,
     LexofficeClient,
     _build_items,
-    _item,
 )
 
 API_KEY     = "test-api-key"
@@ -28,24 +27,21 @@ KARTE_MARKER = f"zettle-import-{TEST_DATE_STR}-karte"
 
 
 def _make_client() -> LexofficeClient:
-    return LexofficeClient(API_KEY, SERVICE_CAT, SALES_CAT, CONTACT_ID)
+    return LexofficeClient(
+        API_KEY, {"service": SERVICE_CAT, "sales": SALES_CAT}, CONTACT_ID
+    )
 
 
 def _summary(
     cash_service=0, cash_sales=0,
     card_service=0, card_sales=0,
 ) -> DailySummary:
-    def _vat(v): return _vat_from_gross(Decimal(str(v)))
-    cs = Decimal(str(cash_service)); csv = _vat(cs)
-    cp = Decimal(str(cash_sales));   cpv = _vat(cp)
-    ks = Decimal(str(card_service)); ksv = _vat(ks)
-    kp = Decimal(str(card_sales));   kpv = _vat(kp)
-    return DailySummary(
-        cash_service_gross=cs, cash_service_vat=csv, cash_service_net=cs-csv,
-        cash_sales_gross=cp,   cash_sales_vat=cpv,   cash_sales_net=cp-cpv,
-        card_service_gross=ks, card_service_vat=ksv, card_service_net=ks-ksv,
-        card_sales_gross=kp,   card_sales_vat=kpv,   card_sales_net=kp-kpv,
-    )
+    summary = DailySummary()
+    summary.add("cash", "service", Decimal("19"), Decimal(str(cash_service)))
+    summary.add("cash", "sales", Decimal("19"), Decimal(str(cash_sales)))
+    summary.add("card", "service", Decimal("19"), Decimal(str(card_service)))
+    summary.add("card", "sales", Decimal("19"), Decimal(str(card_sales)))
+    return summary
 
 
 def _ok(body: dict) -> MagicMock:
@@ -121,25 +117,40 @@ class TestBuildPayload(unittest.TestCase):
 
 class TestBuildItems(unittest.TestCase):
     def test_empty_when_all_zero(self):
-        self.assertEqual(_build_items(
-            Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
-            SERVICE_CAT, SALES_CAT
-        ), [])
+        self.assertEqual(_build_items(DailySummary(), "cash", {
+            "service": SERVICE_CAT, "sales": SALES_CAT
+        }), [])
 
     def test_service_category(self):
-        items = _build_items(Decimal("119"), Decimal("19"), Decimal("0"), Decimal("0"),
-                             SERVICE_CAT, SALES_CAT)
+        items = _build_items(_summary(cash_service=119), "cash", {
+            "service": SERVICE_CAT, "sales": SALES_CAT
+        })
         self.assertEqual(items[0]["categoryId"], SERVICE_CAT)
 
     def test_sales_category(self):
-        items = _build_items(Decimal("0"), Decimal("0"), Decimal("59"), Decimal("9"),
-                             SERVICE_CAT, SALES_CAT)
+        items = _build_items(_summary(cash_sales=59), "cash", {
+            "service": SERVICE_CAT, "sales": SALES_CAT
+        })
         self.assertEqual(items[0]["categoryId"], SALES_CAT)
 
     def test_two_items_when_both_nonzero(self):
-        items = _build_items(Decimal("100"), Decimal("15"), Decimal("50"), Decimal("8"),
-                             SERVICE_CAT, SALES_CAT)
+        items = _build_items(_summary(cash_service=100, cash_sales=50), "cash", {
+            "service": SERVICE_CAT, "sales": SALES_CAT
+        })
         self.assertEqual(len(items), 2)
+
+    def test_configured_vat_rate_is_used(self):
+        summary = DailySummary()
+        summary.add("cash", "food", Decimal("7"), Decimal("107"))
+        item = _build_items(summary, "cash", {"food": "food-cat"})[0]
+        self.assertEqual(item["taxRatePercent"], 7.0)
+        self.assertEqual(item["taxAmount"], 7.0)
+
+    def test_missing_category_id_is_rejected(self):
+        summary = DailySummary()
+        summary.add("cash", "unknown", Decimal("19"), Decimal("119"))
+        with self.assertRaises(LexofficeAPIError):
+            _build_items(summary, "cash", {})
 
 
 # ── create_daily_vouchers ─────────────────────────────────────────────────────

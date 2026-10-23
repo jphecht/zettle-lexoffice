@@ -18,6 +18,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from accounting_config import (
+    AccountingConfig,
+    ConfigurationError,
+    DEFAULT_CONFIG,
+    load_accounting_config,
+)
 from aggregator import AggregationError, DailySummary, aggregate
 from lexoffice_client import LexofficeAPIError, LexofficeClient
 from zettle_client import ZettleAPIError, ZettleClient
@@ -115,12 +121,10 @@ def _build_date_range(args: argparse.Namespace) -> list[date]:
 
 # ── Credentials ───────────────────────────────────────────────────────────────
 
-def _load_clients() -> tuple[ZettleClient, LexofficeClient]:
+def _load_clients() -> tuple[ZettleClient, LexofficeClient, AccountingConfig]:
     required = {
         "ZETTLE_API_KEY":                 os.environ.get("ZETTLE_API_KEY", ""),
         "LEXOFFICE_API_KEY":              os.environ.get("LEXOFFICE_API_KEY", ""),
-        "LEXOFFICE_SERVICE_CATEGORY_ID":  os.environ.get("LEXOFFICE_SERVICE_CATEGORY_ID", ""),
-        "LEXOFFICE_SALES_CATEGORY_ID":    os.environ.get("LEXOFFICE_SALES_CATEGORY_ID", ""),
         "LEXOFFICE_CONTACT_ID":           os.environ.get("LEXOFFICE_CONTACT_ID", ""),
     }
     missing = [k for k, v in required.items() if not v]
@@ -130,14 +134,19 @@ def _load_clients() -> tuple[ZettleClient, LexofficeClient]:
             + "\n".join(f"  {k}" for k in missing)
         )
 
-    zettle    = ZettleClient(required["ZETTLE_API_KEY"])
+    try:
+        config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        category_ids = config.category_ids()
+    except ConfigurationError as exc:
+        sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+
+    zettle = ZettleClient(required["ZETTLE_API_KEY"])
     lexoffice = LexofficeClient(
         required["LEXOFFICE_API_KEY"],
-        required["LEXOFFICE_SERVICE_CATEGORY_ID"],
-        required["LEXOFFICE_SALES_CATEGORY_ID"],
+        category_ids,
         required["LEXOFFICE_CONTACT_ID"],
     )
-    return zettle, lexoffice
+    return zettle, lexoffice, config
 
 
 # ── Single-day processing ─────────────────────────────────────────────────────
@@ -147,6 +156,7 @@ def _process_day(
     zettle: ZettleClient,
     lexoffice: LexofficeClient,
     dry_run: bool,
+    config: AccountingConfig = DEFAULT_CONFIG,
 ) -> tuple[str, str]:
     """Process one day. Returns (status, human-readable detail)."""
     try:
@@ -155,7 +165,7 @@ def _process_day(
         if not purchases:
             return STATUS_SKIPPED, "kein Umsatz"
 
-        summary: DailySummary = aggregate(purchases)
+        summary: DailySummary = aggregate(purchases, config)
 
         if summary.is_empty():
             return STATUS_SKIPPED, "kein Umsatz"
@@ -167,12 +177,15 @@ def _process_day(
         if not dry_run and len(created) == 0:
             return STATUS_SKIPPED, "Belege bereits vorhanden"
 
+        category_detail = ", ".join(
+            f"{category} {gross:.2f} €"
+            for category, gross in summary.category_totals().items()
+        )
         detail = (
             f"Brutto {summary.total_gross:.2f} €"
             f"  Bar {summary.cash_gross:.2f} €"
             f"  Karte {summary.card_gross:.2f} €"
-            f"  (Dienstl. {summary.service_gross:.2f} €"
-            f", Verkauf {summary.sales_gross:.2f} €)"
+            f"  ({category_detail})"
         )
         if dry_run:
             return STATUS_OK, "[DRY-RUN] " + detail
@@ -200,7 +213,7 @@ def main() -> None:
     total = len(days)
     width = len(str(total))
 
-    zettle, lexoffice = _load_clients()
+    zettle, lexoffice, config = _load_clients()
 
     if args.dry_run:
         logger.info("=== DRY-RUN — keine Änderungen in Lexoffice ===")
@@ -209,7 +222,9 @@ def main() -> None:
 
     for i, day in enumerate(days, 1):
         prefix = f"[{i:{width}d}/{total}] {day}"
-        status, detail = _process_day(day, zettle, lexoffice, dry_run=args.dry_run)
+        status, detail = _process_day(
+            day, zettle, lexoffice, dry_run=args.dry_run, config=config
+        )
         counts[status] += 1
 
         if status == STATUS_OK:

@@ -1,0 +1,28 @@
+{
+  "currency": "EUR",
+  "categories": {
+    "service": {
+      "environmentVariable": "LEXOFFICE_SERVICE_CATEGORY_ID"
+    },
+    "sales": {
+      "environmentVariable": "LEXOFFICE_SALES_CATEGORY_ID"
+    }
+  },
+  "products": [
+    {
+      "names": ["Dienstleistung", "Damen WaSchFö"],
+      "category": "service",
+      "vatRate": "19"
+    },
+    {
+      "names": ["Verkauf"],
+      "category": "sales",
+      "vatRate": "19"
+    }
+  ],
+  "adjustments": {
+    "discounts": "useGrossValue",
+    "tips": "reject",
+    "refunds": "reject"
+  }
+}

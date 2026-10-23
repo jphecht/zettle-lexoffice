@@ -2,6 +2,7 @@
 import unittest
 from decimal import Decimal
 
+from accounting_config import AccountingConfig, ProductRule
 from aggregator import (
     AggregationError,
     DailySummary,
@@ -27,6 +28,18 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dic
     if card_cents:
         payments.append({"amount": card_cents, "type": "IZETTLE_CARD"})
     return {"currency": "EUR", "products": products, "payments": payments}
+
+
+def _custom_config(*, allow_discounts=False) -> AccountingConfig:
+    return AccountingConfig(
+        currency="EUR",
+        product_rules=(
+            ProductRule(frozenset({"Haarschnitt"}), "hair", Decimal("19")),
+            ProductRule(frozenset({"Snack"}), "food", Decimal("7")),
+        ),
+        category_environment={"hair": "HAIR_ID", "food": "FOOD_ID"},
+        allow_discounts=allow_discounts,
+    )
 
 
 class TestVatCalculation(unittest.TestCase):
@@ -156,6 +169,34 @@ class TestAggregate(unittest.TestCase):
         p["payments"][0]["amount"] = 900
         with self.assertRaises(AggregationError):
             aggregate([p])
+
+    def test_configured_discount_uses_reported_gross_value(self):
+        purchase = {
+            "currency": "EUR",
+            "products": [{
+                "name": "Haarschnitt", "unitPrice": 1000, "quantity": "1",
+                "grossValue": 900, "vatPercentage": 19,
+            }],
+            "payments": [{"amount": 900, "type": "CASH"}],
+        }
+        summary = aggregate([purchase], _custom_config(allow_discounts=True))
+        self.assertEqual(summary.category_gross("hair"), Decimal("9.00"))
+
+    def test_multiple_configured_vat_rates(self):
+        purchase = {
+            "currency": "EUR",
+            "products": [
+                {"name": "Haarschnitt", "unitPrice": 11900, "quantity": "1",
+                 "vatPercentage": 19},
+                {"name": "Snack", "unitPrice": 10700, "quantity": "1",
+                 "vatPercentage": 7},
+            ],
+            "payments": [{"amount": 22600, "type": "IZETTLE_CARD"}],
+        }
+        summary = aggregate([purchase], _custom_config())
+        self.assertEqual(summary.total_gross, Decimal("226.00"))
+        self.assertEqual(summary.total_vat, Decimal("26.00"))
+        self.assertEqual(summary.category_gross("food"), Decimal("107.00"))
 
     def test_payment_product_mismatch_is_rejected(self):
         p = _purchase(service_cents=1000, cash_cents=1200)
