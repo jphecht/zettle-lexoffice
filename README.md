@@ -260,6 +260,8 @@ Dateien sowie die Git-Historie auf typische Zugangsdatenmuster.
   `Europe/Berlin`, einschließlich Sommer-/Winterzeit.
 - Die Summen aus Zahlungs- und Produktpositionen müssen centgenau
   übereinstimmen.
+- Die Währung muss EUR sein; ein explizit von 19 % abweichender Zettle-Steuersatz
+  wird abgelehnt.
 - Belege tragen einen stabilen Marker wie `zettle-import-YYYY-MM-DD-bar`.
   Vor dem Schreiben wird in Lexware Office danach gesucht.
 - Der Schutz verhindert normale Wiederholungen, ersetzt aber keine serverseitige
