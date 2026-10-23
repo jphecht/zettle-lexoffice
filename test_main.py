@@ -5,8 +5,15 @@ from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from accounting_config import DEFAULT_CONFIG
-from main import STATUS_FAILED, STATUS_OK, STATUS_SKIPPED, _build_date_range, _process_day
+from accounting_config import AccountingConfig, DEFAULT_CONFIG, GiftCardPolicy
+from main import (
+    STATUS_FAILED,
+    STATUS_OK,
+    STATUS_SKIPPED,
+    _build_date_range,
+    _gift_card_review_detail,
+    _process_day,
+)
 
 TODAY = date(2025, 6, 1)
 
@@ -84,6 +91,31 @@ class TestBuildDateRange(unittest.TestCase):
         import argparse
         args = argparse.Namespace(date=None, from_date=None, to_date=None, dry_run=False)
         self.assertEqual(_build_date_range(args), [TODAY - timedelta(days=1)])
+
+
+class TestGiftCardReview(unittest.TestCase):
+    def test_rejected_gift_cards_are_reported(self):
+        self.assertIn("gesperrt", _gift_card_review_detail(DEFAULT_CONFIG))
+
+    def test_review_reports_industry_rates_and_candidate(self):
+        policy = GiftCardPolicy(
+            mode="reviewRequired",
+            industry_profile="gastronomy",
+            redeemable_categories=frozenset({"food", "drinks"}),
+            vat_rates=(Decimal("7"), Decimal("19")),
+        )
+        config = AccountingConfig(
+            currency=DEFAULT_CONFIG.currency,
+            product_rules=DEFAULT_CONFIG.product_rules,
+            category_environment=DEFAULT_CONFIG.category_environment,
+            gift_cards=policy,
+        )
+        detail = _gift_card_review_detail(config)
+        self.assertIn("gastronomy", detail)
+        self.assertIn("7%", detail)
+        self.assertIn("19%", detail)
+        self.assertIn("Mehrzweckgutschein-Kandidat", detail)
+        self.assertIn("Keine Buchungsfreigabe", detail)
 
 
 # ── _process_day ──────────────────────────────────────────────────────────────

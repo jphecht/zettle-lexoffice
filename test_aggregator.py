@@ -2,7 +2,7 @@
 import unittest
 from decimal import Decimal
 
-from accounting_config import AccountingConfig, ProductRule, TipRule
+from accounting_config import AccountingConfig, GiftCardPolicy, ProductRule, TipRule
 from aggregator import (
     AggregationError,
     DailySummary,
@@ -31,7 +31,7 @@ def _purchase(service_cents=0, sales_cents=0, cash_cents=0, card_cents=0) -> dic
 
 
 def _custom_config(
-    *, allow_discounts=False, tips=False, refunds=False
+    *, allow_discounts=False, tips=False, refunds=False, gift_cards=None
 ) -> AccountingConfig:
     return AccountingConfig(
         currency="EUR",
@@ -52,6 +52,7 @@ def _custom_config(
             TipRule("202", "employee", "employeeTips", Decimal("0")),
         ) if tips else (),
         refund_mode="separateCreditNote" if refunds else "reject",
+        gift_cards=gift_cards or GiftCardPolicy(),
     )
 
 
@@ -448,6 +449,41 @@ class TestAggregate(unittest.TestCase):
              "payments": [], "currency": "EUR"}
         with self.assertRaises(AggregationError):
             aggregate([p])
+
+    def test_gift_card_sale_is_explicitly_blocked_even_if_name_is_mapped(self):
+        p = {
+            "currency": "EUR",
+            "products": [{
+                "name": "Haarschnitt",
+                "type": "GIFTCARD",
+                "unitPrice": 1000,
+                "quantity": "1",
+            }],
+            "payments": [{"amount": 1000, "type": "CASH"}],
+        }
+        with self.assertRaisesRegex(AggregationError, "Gutscheinverkauf ist gesperrt"):
+            aggregate([p], _custom_config())
+
+    def test_gift_card_payment_is_explicitly_blocked(self):
+        p = {
+            "currency": "EUR",
+            "products": [{
+                "name": "Haarschnitt",
+                "unitPrice": 1000,
+                "quantity": "1",
+            }],
+            "payments": [{"amount": 1000, "type": "GIFTCARD"}],
+        }
+        policy = GiftCardPolicy(
+            mode="reviewRequired",
+            industry_profile="hairAndBeauty",
+            redeemable_categories=frozenset({"hair"}),
+            vat_rates=(Decimal("19"),),
+        )
+        with self.assertRaisesRegex(
+            AggregationError, "Vorprüfung: Einzweckgutschein-Kandidat"
+        ):
+            aggregate([p], _custom_config(gift_cards=policy))
 
     def test_fractional_minor_payment_is_rejected(self):
         p = _purchase(service_cents=1000, cash_cents=1000)

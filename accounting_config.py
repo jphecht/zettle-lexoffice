@@ -32,6 +32,29 @@ class TipRule:
 
 
 @dataclass(frozen=True)
+class GiftCardPolicy:
+    """Non-booking review metadata for Zettle gift cards.
+
+    Industry is deliberately descriptive only.  The recommendation is derived
+    from the configured VAT rates of the categories in which the gift card may
+    actually be redeemed.  It never enables accounting automatically.
+    """
+
+    mode: str = "reject"
+    industry_profile: Optional[str] = None
+    redeemable_categories: frozenset[str] = frozenset()
+    vat_rates: tuple[Decimal, ...] = ()
+
+    @property
+    def recommendation(self) -> Optional[str]:
+        if self.mode != "reviewRequired":
+            return None
+        if len(self.vat_rates) == 1:
+            return "singlePurposeCandidate"
+        return "multiPurposeCandidate"
+
+
+@dataclass(frozen=True)
 class AccountingConfig:
     currency: str
     product_rules: tuple[ProductRule, ...]
@@ -40,6 +63,7 @@ class AccountingConfig:
     tip_mode: str = "reject"
     tip_rules: tuple[TipRule, ...] = ()
     refund_mode: str = "reject"
+    gift_cards: GiftCardPolicy = GiftCardPolicy()
 
     def rule_for_product(self, name: str) -> ProductRule:
         matches = [rule for rule in self.product_rules if name in rule.names]
@@ -179,6 +203,11 @@ def _parse_config(raw: object) -> AccountingConfig:
         raise ConfigurationError(
             "adjustments.refunds muss reject oder separateCreditNote sein"
         )
+    gift_cards = _parse_gift_card_policy(
+        adjustments.get("giftCards", "reject"),
+        category_environment,
+        rules,
+    )
 
     return AccountingConfig(
         currency=currency,
@@ -188,6 +217,61 @@ def _parse_config(raw: object) -> AccountingConfig:
         tip_mode=tip_mode,
         tip_rules=tip_rules,
         refund_mode=refund_mode,
+        gift_cards=gift_cards,
+    )
+
+
+def _parse_gift_card_policy(
+    value: object,
+    category_environment: Mapping[str, str],
+    product_rules: list[ProductRule],
+) -> GiftCardPolicy:
+    if value == "reject":
+        return GiftCardPolicy()
+    if not isinstance(value, dict) or value.get("mode") != "reviewRequired":
+        raise ConfigurationError(
+            "adjustments.giftCards muss reject oder ein reviewRequired-Objekt sein"
+        )
+
+    industry = value.get("industryProfile")
+    if not isinstance(industry, str) or not industry.strip():
+        raise ConfigurationError(
+            "Gutscheinprüfung benötigt ein nichtleeres industryProfile"
+        )
+
+    categories = value.get("redeemableCategories")
+    if not isinstance(categories, list) or not categories or not all(
+        isinstance(category, str) and category.strip() for category in categories
+    ):
+        raise ConfigurationError(
+            "Gutscheinprüfung benötigt gültige redeemableCategories"
+        )
+    clean_categories = frozenset(category.strip() for category in categories)
+    unknown = clean_categories - set(category_environment)
+    if unknown:
+        raise ConfigurationError(
+            "Unbekannte Gutschein-Kategorien: " + ", ".join(sorted(unknown))
+        )
+
+    rates = tuple(sorted({
+        rule.vat_rate
+        for rule in product_rules
+        if rule.category in clean_categories
+    }))
+    categories_without_products = clean_categories - {
+        rule.category for rule in product_rules
+    }
+    if categories_without_products:
+        raise ConfigurationError(
+            "Gutschein-Kategorien ohne Produktregel: "
+            + ", ".join(sorted(categories_without_products))
+        )
+
+    return GiftCardPolicy(
+        mode="reviewRequired",
+        industry_profile=industry.strip(),
+        redeemable_categories=clean_categories,
+        vat_rates=rates,
     )
 
 

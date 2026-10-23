@@ -7,6 +7,7 @@ Verwendung:
   python main.py --date 2025-01-15                  # bestimmter Tag
   python main.py --from 2025-01-01 --to 2025-05-31  # Bulk-Import
   python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
+  python main.py --review-gift-cards                 # nur lokale Vorprüfung
 """
 import argparse
 import logging
@@ -77,6 +78,10 @@ def _parse_args() -> argparse.Namespace:
         "--from", dest="from_date", metavar="YYYY-MM-DD",
         help="Startdatum für Bulk-Import",
     )
+    group.add_argument(
+        "--review-gift-cards", action="store_true",
+        help="Gutschein-Konfiguration lokal prüfen (keine API-Aufrufe)",
+    )
     p.add_argument(
         "--to", dest="to_date", metavar="YYYY-MM-DD",
         help="Enddatum für Bulk-Import (erforderlich mit --from)",
@@ -91,6 +96,8 @@ def _parse_args() -> argparse.Namespace:
         p.error("--from erfordert auch --to")
     if args.to_date and not args.from_date:
         p.error("--to erfordert auch --from")
+    if args.review_gift_cards and args.dry_run:
+        p.error("--review-gift-cards kann nicht mit --dry-run kombiniert werden")
 
     return args
 
@@ -117,6 +124,26 @@ def _build_date_range(args: argparse.Namespace) -> list[date]:
         return [_to_date(args.date)]
 
     return [date.today() - timedelta(days=1)]
+
+
+def _gift_card_review_detail(config: AccountingConfig) -> str:
+    policy = config.gift_cards
+    if policy.mode == "reject":
+        return "Gutscheine: gesperrt; keine fachliche Vorprüfung konfiguriert"
+
+    rates = ", ".join(f"{rate}%" for rate in policy.vat_rates)
+    categories = ", ".join(sorted(policy.redeemable_categories))
+    if policy.recommendation == "singlePurposeCandidate":
+        recommendation = "Einzweckgutschein-Kandidat"
+    else:
+        recommendation = "Mehrzweckgutschein-Kandidat"
+    return (
+        f"Branche: {policy.industry_profile}; "
+        f"einlösbare Kategorien: {categories}; "
+        f"Steuersätze: {rates}; Vorprüfung: {recommendation}. "
+        "Keine Buchungsfreigabe — Leistungsort und Gutscheinbedingungen "
+        "müssen noch bestätigt werden."
+    )
 
 
 # ── Credentials ───────────────────────────────────────────────────────────────
@@ -214,10 +241,18 @@ def _process_day(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    _setup_logging()
     load_dotenv()
 
     args  = _parse_args()
+    if args.review_gift_cards:
+        try:
+            config = load_accounting_config(os.environ.get("ACCOUNTING_CONFIG"))
+        except ConfigurationError as exc:
+            sys.exit(f"Ungültige Buchungskonfiguration: {exc}")
+        print(_gift_card_review_detail(config))
+        return
+
+    _setup_logging()
     days  = _build_date_range(args)
     total = len(days)
     width = len(str(total))
