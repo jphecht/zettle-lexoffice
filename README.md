@@ -230,6 +230,38 @@ python main.py --review-gift-cards
 Der Befehl liest ausschließlich die lokale `accounting.json` und meldet Branche,
 einlösbare Kategorien, gefundene Steuersätze sowie den Prüfvorschlag.
 
+#### Zettle-Produktkatalog prüfen
+
+Der Produktkatalog kann mit einem ausschließlich lesenden Zettle-Zugriff gegen
+die Buchungskonfiguration geprüft werden:
+
+```bash
+python main.py --review-catalog
+```
+
+Der Befehl verwendet nur den Zettle-Berechtigungsumfang `READ:PRODUCT` und ruft
+Lexware Office nicht auf. Er verändert weder den Zettle-Katalog noch lokale
+Konfigurationsdateien. Gemeldet werden:
+
+- alle im Katalog gefundenen Steuersätze,
+- nicht zugeordnete Produkte,
+- Abweichungen zwischen Zettle und `accounting.json`,
+- Produkte mit mehreren oder ungültigen Steuersätzen,
+- 0-%-Produkte, deren konkreter Steuergrund noch geprüft werden muss,
+- Gutscheinprodukte, die weiterhin für den Import gesperrt sind.
+
+Für die Gutschein-Vorprüfung werden die tatsächlich gefundenen Steuersätze der
+als einlösbar konfigurierten Kategorien verwendet. Kommt dort beispielsweise
+erstmals ein 7-%-Produkt zu bisherigen 19-%-Produkten hinzu, wechselt der
+Prüfvorschlag auf `multiPurposeCandidate`; die Abweichung bleibt gleichzeitig
+ein Blocker.
+
+Unbekannte Produkte, Steuerabweichungen, Gutscheinprodukte und ungeklärte
+0-%-Produkte gelten als Blocker. Dann endet der Befehl mit Exit-Code 1. Dadurch
+kann die Prüfung später vor einen Monatsimport oder eine Automatisierung
+geschaltet werden. Der Katalog ersetzt keine Prüfung der tatsächlichen
+Gutscheinbedingungen; die Branche bleibt nur eine Vorauswahl.
+
 ---
 
 ### Fertige `.env`
@@ -269,6 +301,9 @@ python main.py --from 2025-01-01 --to 2025-05-31 --dry-run
 
 # Gutschein-Konfiguration lokal prüfen — keine API-Aufrufe
 python main.py --review-gift-cards
+
+# Zettle-Produktkatalog nur lesend prüfen — kein Lexware-Aufruf
+python main.py --review-catalog
 ```
 
 ### Beispielausgabe (Bulk-Import)
@@ -341,6 +376,7 @@ zettle-lexoffice/
 ├── accounting_config.py  # validierte Produkt-, Kategorie- und Steuerregeln
 ├── accounting.example.json
 ├── aggregator.py         # Aggregation nach Zahlungsart, Kategorie und Steuer
+├── catalog_review.py     # lesende Produkt- und Steuersatzprüfung
 ├── requirements.txt
 ├── requirements.lock     # reproduzierbar geprüfte Paketversionen
 ├── SECURITY.md

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from zettle_client import (
     CARD_PAYMENT_TYPES,
+    ZETTLE_PRODUCT_API,
     ZettleAPIError,
     ZettleAuthError,
     ZettleClient,
@@ -259,6 +260,28 @@ class TestGetPurchasesForDay(unittest.TestCase):
         good = _purchases_resp([_make_purchase("ok", 1000, "IZETTLE_CARD")])
         mock_get.side_effect = [_error_resp(503), good]
         self.assertEqual(len(self.client.get_purchases_for_day(self.test_date)), 1)
+
+
+class TestGetProducts(unittest.TestCase):
+    @patch("zettle_client.ZettleClient._get")
+    def test_reads_product_library_from_list_response(self, mock_get):
+        mock_get.return_value = [{"name": "Haarschnitt", "variants": []}]
+        client = _make_client()
+        self.assertEqual(len(client.get_products()), 1)
+        mock_get.assert_called_once_with(ZETTLE_PRODUCT_API, {})
+
+    @patch("zettle_client.ZettleClient._get")
+    def test_reads_wrapped_product_response(self, mock_get):
+        mock_get.return_value = {
+            "products": [{"name": "Haarschnitt", "variants": []}]
+        }
+        self.assertEqual(len(_make_client().get_products()), 1)
+
+    @patch("zettle_client.ZettleClient._get")
+    def test_rejects_invalid_product_response(self, mock_get):
+        mock_get.return_value = {"products": "invalid"}
+        with self.assertRaises(ZettleAPIError):
+            _make_client().get_products()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

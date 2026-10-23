@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 ZETTLE_TOKEN_URL    = "https://oauth.zettle.com/token"
 ZETTLE_PURCHASE_API = "https://purchase.izettle.com/purchases/v2"
+ZETTLE_PRODUCT_API  = "https://products.izettle.com/organizations/self/products/v2"
 
 _TOKEN_REFRESH_MARGIN = 60  # seconds before expiry to refresh proactively
 
@@ -171,6 +172,26 @@ class ZettleClient:
 
         logger.info("Zettle: fetched %d purchase(s) for %s", len(purchases), business_date)
         return purchases
+
+    # ── Product library (read-only setup review) ─────────────────────────────
+
+    def get_products(self) -> list[dict]:
+        """Return the merchant's product library using READ:PRODUCT only."""
+        data = self._get(ZETTLE_PRODUCT_API, {})
+        if isinstance(data, list):
+            products = data
+        elif isinstance(data, dict):
+            products = data.get("products")
+        else:
+            products = None
+        if not isinstance(products, list) or not all(
+            isinstance(product, dict) for product in products
+        ):
+            raise ZettleAPIError(
+                "Zettle-Antwort enthält keine gültige Produktliste"
+            )
+        logger.info("Zettle: fetched %d catalog product(s)", len(products))
+        return products
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

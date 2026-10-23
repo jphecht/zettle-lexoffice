@@ -1,10 +1,13 @@
 """Integration-style tests for main.py."""
+import argparse
+import io
 import unittest
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import main as main_module
 from accounting_config import AccountingConfig, DEFAULT_CONFIG, GiftCardPolicy
 from main import (
     STATUS_FAILED,
@@ -116,6 +119,36 @@ class TestGiftCardReview(unittest.TestCase):
         self.assertIn("19%", detail)
         self.assertIn("Mehrzweckgutschein-Kandidat", detail)
         self.assertIn("Keine Buchungsfreigabe", detail)
+
+
+class TestCatalogReviewCommand(unittest.TestCase):
+    @patch("main.load_dotenv")
+    @patch("main._setup_logging")
+    @patch("main.ZettleClient")
+    @patch("main._parse_args")
+    def test_catalog_review_is_read_only_and_skips_lexware(
+        self, mock_args, mock_zettle_class, mock_setup_logging, _mock_load_dotenv
+    ):
+        mock_args.return_value = argparse.Namespace(
+            date=None,
+            from_date=None,
+            to_date=None,
+            dry_run=False,
+            review_gift_cards=False,
+            review_catalog=True,
+        )
+        mock_zettle_class.return_value.get_products.return_value = [
+            {"name": "Dienstleistung", "variants": [{"vatPercentage": 19}]},
+            {"name": "Damen WaSchFö", "variants": [{"vatPercentage": 19}]},
+            {"name": "Verkauf", "variants": [{"vatPercentage": 19}]},
+        ]
+        with patch.dict("main.os.environ", {"ZETTLE_API_KEY": "test"}, clear=True):
+            with patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                main_module.main()
+
+        self.assertIn("Katalogprüfung ohne Blocker", stdout.getvalue())
+        mock_zettle_class.return_value.get_products.assert_called_once_with()
+        mock_setup_logging.assert_not_called()
 
 
 # ── _process_day ──────────────────────────────────────────────────────────────
